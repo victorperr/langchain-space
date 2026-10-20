@@ -134,34 +134,51 @@ def seed_files(sandbox: SpaceSandbox, count: int) -> list[str]:
     return [path for path, _ in files]
 
 
+def release(client: SpaceClient, created: list[str], *sandbox_ids: str) -> None:
+    """Delete sandboxes a benchmark no longer needs, so samples don't pile up running VMs.
+
+    An id whose delete fails stays in `created` for the final cleanup.
+    """
+    for sandbox_id in sandbox_ids:
+        with contextlib.suppress(Exception):
+            client.delete_sandbox(sandbox_id)
+            created.remove(sandbox_id)
+
+
 def bench_snapshots(
-    client: SpaceClient, template: str, runs: int, files: int
-) -> tuple[list[Latency], list[str]]:
-    """Fork, anchor (fork + suspend) and restore (fork from anchor) latency."""
+    client: SpaceClient, template: str, runs: int, files: int, created: list[str]
+) -> list[Latency]:
+    """Fork, anchor (fork + suspend) and restore (fork from anchor) latency.
+
+    Every sandbox id goes into `created` as soon as it exists, so the caller can clean up
+    after a failure; each sample's sandboxes are deleted before the next sample.
+    """
     fork, anchor, restore = Latency("fork live sandbox"), Latency("anchor"), Latency("restore")
     snapshotter = Snapshotter(client)
-    created: list[str] = []
     source = SpaceSandbox.create(client, template)
     created.append(source.id)
     seed_files(source, files)
     for _ in range(runs):
         with timed(fork):
-            created.append(client.fork(source.id))
+            fork_id = client.fork(source.id)
+        created.append(fork_id)
         with timed(anchor):
             anchor_id = snapshotter.anchor(source.id)
         created.append(anchor_id)
         with timed(restore):
-            created.append(snapshotter.restore(SnapshotBinding(template, anchor_id)))
-    return [fork, anchor, restore], created
+            restored_id = snapshotter.restore(SnapshotBinding(template, anchor_id))
+        created.append(restored_id)
+        release(client, created, fork_id, restored_id, anchor_id)
+    release(client, created, source.id)
+    return [fork, anchor, restore]
 
 
 def bench_branch_restores(
-    client: SpaceClient, template: str, branches: int, files: int
-) -> tuple[Correctness, list[str]]:
+    client: SpaceClient, template: str, branches: int, files: int, created: list[str]
+) -> Correctness:
     """N forks of one anchor each rewrite every file; a restore must still match the anchor."""
     result = Correctness("anchor restore after N divergent branches", branches, 0)
     snapshotter = Snapshotter(client)
-    created: list[str] = []
     source = SpaceSandbox.create(client, template)
     created.append(source.id)
     paths = seed_files(source, files)
@@ -181,16 +198,17 @@ def bench_branch_restores(
             result.correct += 1
         else:
             result.failures.append(f"branch {i}: restored={got[:12]} isolated={branch_isolated}")
-    return result, created
+        release(client, created, branch.id, restored.id)
+    release(client, created, source.id, anchor_id)
+    return result
 
 
 def bench_checkpoint_branches(
-    client: SpaceClient, template: str, branches: int
-) -> tuple[Correctness, Latency, SpaceCheckpointer]:
+    saver: SpaceCheckpointer, branches: int
+) -> tuple[Correctness, Latency]:
     """N branches from one LangGraph checkpoint: each must observe that checkpoint's file."""
     result = Correctness("LangGraph branches from one checkpoint", branches, 0)
     per_branch = Latency("branch run from old checkpoint (restore + 1 step)")
-    saver = SpaceCheckpointer(InMemorySaver(), client, template=template)
     graph = build_edit_graph(saver.backend, saver)
     for target in ("base", "later"):
         graph.invoke({"target": target}, thread("bench"))
@@ -202,7 +220,8 @@ def bench_checkpoint_branches(
             result.correct += 1
         else:
             result.failures.append(f"branch {i} observed {observed!r}")
-    return result, per_branch, saver
+        saver.registry.delete_retired()  # the previous branch's sandbox is never used again
+    return result, per_branch
 
 
 def run_benchmarks(
@@ -211,23 +230,17 @@ def run_benchmarks(
     """Run every benchmark, cleaning up all sandboxes it created even on failure."""
     report = Report(backend, machine_info(), datetime.now(UTC).isoformat(timespec="seconds"))
     created: list[str] = []
-    saver: SpaceCheckpointer | None = None
+    saver = SpaceCheckpointer(InMemorySaver(), client, template=template)
     try:
-        latencies, ids = bench_snapshots(client, template, runs, files)
-        created += ids
-        report.latencies += latencies
-
-        restores, ids = bench_branch_restores(client, template, branches, files)
-        created += ids
-        report.correctness.append(restores)
-
-        checkpoint_result, per_branch, saver = bench_checkpoint_branches(client, template, branches)
+        report.latencies += bench_snapshots(client, template, runs, files, created)
+        report.correctness.append(bench_branch_restores(client, template, branches, files, created))
+        checkpoint_result, per_branch = bench_checkpoint_branches(saver, branches)
         report.correctness.append(checkpoint_result)
         report.latencies.append(per_branch)
     finally:
-        if saver is not None:
+        with contextlib.suppress(Exception):
             saver.close()
-            created += saver.registry.anchors
+        created += saver.registry.retired + saver.registry.anchors
         for sandbox_id in created:
             with contextlib.suppress(Exception):
                 client.delete_sandbox(sandbox_id)
