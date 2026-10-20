@@ -105,6 +105,11 @@ class Snapshotter:
         self._env = dict(env or {})
         self._network_policy = dict(network_policy) if network_policy is not None else None
 
+    @property
+    def network_policy(self) -> dict[str, Any] | None:
+        """The network policy every restored sandbox gets."""
+        return self._network_policy
+
     def anchor(self, sandbox_id: str) -> str:
         """Fork `sandbox_id` into a suspended, never-again-run anchor; return its id."""
         anchor_id = self.client.fork(sandbox_id, lifetime_seconds=self._anchor_lifetime)
@@ -228,6 +233,9 @@ class SandboxRegistry:
         Used to continue in the winner of `fork_and_select`. The winner descends from the
         base state plus the branch's writes, exactly like writes made in place, so the
         thread keeps its position and the next checkpoint snapshots the winner.
+
+        Only `sandbox.id` is taken: the thread drives it through a backend built with this
+        registry's settings, so `backend_kwargs` (e.g. `content_check`) still apply.
         """
         slot = self._thread(thread_id)
         with slot.changed:
@@ -235,7 +243,7 @@ class SandboxRegistry:
             if slot.live is not None and slot.live.backend.id != sandbox.id:
                 self.retired.append(slot.live.backend.id)
             # anchored_generation=-1: never "clean", so the next checkpoint snapshots it.
-            slot.live = _Live(sandbox, anchor_id=None, anchored_generation=-1)
+            slot.live = _Live(self._wrap(sandbox.id), anchor_id=None, anchored_generation=-1)
 
     # ------------------------------------------------------------------ internals
 
@@ -293,12 +301,19 @@ class SandboxRegistry:
     def _materialize(self, slot: _Thread) -> SpaceSandbox:
         if slot.live is None:
             binding = slot.position_binding or SnapshotBinding(self.template)
-            sandbox_id = self.snapshotter.restore(binding)
-            backend = SpaceSandbox(
-                self.snapshotter.client, sandbox_id, owns_sandbox=True, **self._backend_kwargs
-            )
+            backend = self._wrap(self.snapshotter.restore(binding))
             slot.live = _Live(backend, binding.anchor_id, backend.generation)
         return slot.live.backend
+
+    def _wrap(self, sandbox_id: str) -> SpaceSandbox:
+        """The backend for a thread's live sandbox, with this registry's settings."""
+        return SpaceSandbox(
+            self.snapshotter.client,
+            sandbox_id,
+            owns_sandbox=True,
+            network_policy=self.snapshotter.network_policy,
+            **self._backend_kwargs,
+        )
 
     # ------------------------------------------------------------------ inspection / cleanup
 

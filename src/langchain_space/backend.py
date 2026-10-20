@@ -75,6 +75,8 @@ class SpaceSandbox(BaseSandbox):
         content_check: Called with `(content, where)` before anything is sent into the
             sandbox (commands, uploaded files); raising blocks it. Use
             `langchain_space.credentials.SecretGuard` to keep host secrets out of the VM.
+        network_policy: The SPACE network policy this sandbox runs under. Not applied
+            here (`create` applies it); recorded so forks of it can re-apply it.
     """
 
     def __init__(
@@ -86,6 +88,7 @@ class SpaceSandbox(BaseSandbox):
         max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
         owns_sandbox: bool = False,
         content_check: ContentCheck | None = None,
+        network_policy: Mapping[str, Any] | None = None,
     ) -> None:
         self._client = client
         self._sandbox_id = sandbox_id
@@ -93,6 +96,7 @@ class SpaceSandbox(BaseSandbox):
         self._max_output_chars = max_output_chars
         self._owns_sandbox = owns_sandbox
         self._content_check = content_check
+        self._network_policy = dict(network_policy) if network_policy is not None else None
         self._generation = 0
         self._lock = threading.Lock()
 
@@ -115,7 +119,24 @@ class SpaceSandbox(BaseSandbox):
             for key, value in (env or {}).items():
                 check(f"{key}={value}".encode(), "sandbox env")
         sandbox_id = client.create_sandbox(template, env=env, network_policy=network_policy)
-        return cls(client, sandbox_id, owns_sandbox=True, **kwargs)
+        return cls(client, sandbox_id, owns_sandbox=True, network_policy=network_policy, **kwargs)
+
+    def derive(self, sandbox_id: str, *, owns_sandbox: bool = True) -> SpaceSandbox:
+        """A backend for another sandbox (e.g. a fork of this one) with the same settings.
+
+        Keeps `content_check`, timeouts, output limit and network policy, so a fork is never
+        less guarded than its source. Applying the policy to the new sandbox is the
+        caller's job (see `fork_and_select`).
+        """
+        return type(self)(
+            self._client,
+            sandbox_id,
+            default_timeout=self._default_timeout,
+            max_output_chars=self._max_output_chars,
+            owns_sandbox=owns_sandbox,
+            content_check=self._content_check,
+            network_policy=self._network_policy,
+        )
 
     @property
     def id(self) -> str:
@@ -126,6 +147,11 @@ class SpaceSandbox(BaseSandbox):
     def client(self) -> SpaceClient:
         """The client this backend talks through."""
         return self._client
+
+    @property
+    def network_policy(self) -> dict[str, Any] | None:
+        """The network policy this sandbox runs under, if one was set (a copy)."""
+        return dict(self._network_policy) if self._network_policy is not None else None
 
     @property
     def generation(self) -> int:

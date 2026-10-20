@@ -45,6 +45,8 @@ the state that matters.
   (keeping them is right for parallel peers that succeeded; exact fidelity needs per-task snapshots).
 - **Fork-and-select**: anchor the current state, issue N concurrent fork requests, run each branch, run
   the test command in each, keep the lowest-index passing branch, delete the rest in `finally`.
+  Branches use `SpaceSandbox.derive` (same `content_check`, limits, network policy; the policy is
+  re-applied to each fork), and `adopt` rewraps the winner with the registry's `backend_kwargs`.
 
 ## Repo layout
 ```

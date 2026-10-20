@@ -72,6 +72,10 @@ def fork_and_select(
     then `test_command` runs in that fork; exit code 0 means pass. The winner is the
     passing branch with the lowest index, so the result does not depend on timing.
 
+    Forks are driven with the source's settings (`SpaceSandbox.derive`), so its
+    `content_check` still applies, and the source's network policy is re-applied to each
+    fork before its branch runs (SPACE does not document whether forks inherit it).
+
     Args:
         sandbox: The state every branch starts from.
         branches: One callable per alternative.
@@ -83,14 +87,17 @@ def fork_and_select(
     if not branches:
         raise ValueError("fork_and_select needs at least one branch")
     client = sandbox.client
+    network_policy = sandbox.network_policy
 
     def run(index: int, branch: Branch[T]) -> BranchResult[T]:
         try:
             child_id = client.fork(sandbox.id)
         except Exception:
             return BranchResult(index, None, passed=False, error=traceback.format_exc())
-        child = SpaceSandbox(client, child_id, owns_sandbox=True)
+        child = sandbox.derive(child_id)
         try:
+            if network_policy is not None:
+                client.set_network_policy(child_id, network_policy)
             value = branch(child)
             test = child.execute(test_command, timeout=test_timeout)
         except Exception:
@@ -115,7 +122,7 @@ def fork_and_select(
                 with contextlib.suppress(Exception):
                     client.delete_sandbox(result.sandbox_id)
     winning_sandbox = (
-        SpaceSandbox(client, winner.sandbox_id, owns_sandbox=True)
+        sandbox.derive(winner.sandbox_id)
         if winner is not None and winner.sandbox_id is not None
         else None
     )
