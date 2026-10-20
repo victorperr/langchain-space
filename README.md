@@ -26,7 +26,8 @@ sandbox state move together.
   one whose tests pass.
 - **Credentials stay out of the VM**: rules and policies for SPACE's network-layer credential
   injection and deny-by-default egress, plus a `SecretGuard` that refuses to send host
-  secrets into the sandbox.
+  secrets into the sandbox. Public DNS resolvers stay reachable (domain rules need them), so
+  DNS tunnelling can still leak files the agent can read, but never the injected credentials.
 
 ## Architecture
 

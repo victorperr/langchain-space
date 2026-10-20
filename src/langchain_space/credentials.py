@@ -3,7 +3,12 @@
 The sandbox never sees a secret. You register an AWS Secrets Manager secret *by reference*,
 and SPACE's per-sandbox gateway adds it as an HTTP header to matching outbound requests
 (TLS is intercepted for that). Combined with a deny-by-default egress policy, a
-prompt-injected agent has no key to leak and nowhere to send it.
+prompt-injected agent has no key to leak and no direct route to an attacker's server.
+
+Caveat: domain egress rules need the guest to resolve names through the public resolvers
+(`PUBLIC_RESOLVERS`), which stay reachable. DNS queries to them can still carry data out
+(DNS tunnelling). That cannot expose injected credentials, which never enter the VM, but it
+can expose files the agent can read. Keep secrets out of the sandbox's files too.
 
 ```python
 rule = CredentialRule(host="api.github.com", header="authorization",
@@ -132,7 +137,8 @@ def build_network_policy(
     """Build a SPACE network policy: egress allowlist plus credential injection rules.
 
     Hosts that receive credentials are allowed automatically. With `deny_by_default`, any
-    other destination is blocked, which is what stops exfiltration.
+    other destination is blocked, which stops direct exfiltration. The public resolvers stay
+    allowed, so DNS tunnelling is still possible (see the module docstring).
     """
     allow: list[dict[str, str]] = [{"ip": ip} for ip in (*PUBLIC_RESOLVERS, *allow_ips)]
     domains = dict.fromkeys([*allow_domains, *(c.rule.host for c in credentials)])
