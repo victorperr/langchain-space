@@ -84,6 +84,20 @@ def test_a_raising_branch_is_a_failed_branch(fake: FakeSpaceClient, source: Spac
     assert result.winner is not None and result.winner.index == 1
 
 
+class Abort(BaseException):
+    """Stands in for KeyboardInterrupt / SystemExit without disturbing pytest."""
+
+
+def test_an_aborted_run_deletes_every_fork(fake: FakeSpaceClient, source: SpaceSandbox) -> None:
+    def abort(sandbox: SpaceSandbox) -> str:
+        raise Abort
+
+    with pytest.raises(Abort):
+        fork_and_select(source, [writer("good"), abort, writer("good")], test_command="run-tests")
+    assert len(fake.calls_to("fork")) == 3
+    assert {s.id for s in fake.live_sandboxes} == {source.id}
+
+
 def test_branches_run_concurrently(fake: FakeSpaceClient, source: SpaceSandbox) -> None:
     barrier = threading.Barrier(3, timeout=5)  # deadlocks unless all 3 run at once
 

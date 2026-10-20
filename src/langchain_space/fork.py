@@ -88,12 +88,15 @@ def fork_and_select(
         raise ValueError("fork_and_select needs at least one branch")
     client = sandbox.client
     network_policy = sandbox.network_policy
+    forked: list[str] = []
+    """Every fork, recorded as soon as it exists, so cleanup also covers aborted runs."""
 
     def run(index: int, branch: Branch[T]) -> BranchResult[T]:
         try:
             child_id = client.fork(sandbox.id)
         except Exception:
             return BranchResult(index, None, passed=False, error=traceback.format_exc())
+        forked.append(child_id)
         child = sandbox.derive(child_id)
         try:
             if network_policy is not None:
@@ -111,16 +114,24 @@ def fork_and_select(
             exit_code=test.exit_code,
         )
 
-    with ThreadPoolExecutor(max_workers=max_workers or len(branches)) as pool:
-        results = list(pool.map(run, range(len(branches)), branches))
-
-    winner = next((r for r in results if r.passed), None)
-    if not keep_losers:
-        for result in results:
-            if result is not winner and result.sandbox_id is not None:
+    keep: set[str] = set()
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers or len(branches)) as pool:
+            results = list(pool.map(run, range(len(branches)), branches))
+        winner = next((r for r in results if r.passed), None)
+        keep = {
+            r.sandbox_id
+            for r in results
+            if r.sandbox_id is not None and (r is winner or keep_losers)
+        }
+    finally:
+        # Runs on success and when a branch or the caller aborts (e.g. KeyboardInterrupt);
+        # the pool has joined its workers by now, so `forked` is complete.
+        for child_id in forked:
+            if child_id not in keep:
                 # A failed cleanup must not hide the outcome.
                 with contextlib.suppress(Exception):
-                    client.delete_sandbox(result.sandbox_id)
+                    client.delete_sandbox(child_id)
     winning_sandbox = (
         sandbox.derive(winner.sandbox_id)
         if winner is not None and winner.sandbox_id is not None
