@@ -197,9 +197,9 @@ class FakeSpaceClient:
             raise _path_not_found(path)
         sandbox.files[normalized] = bytes(data)
 
-    def read_file(self, sandbox_id: str, path: str) -> bytes:
-        """See `SpaceClient.read_file`."""
-        self._record("read_file", sandbox_id=sandbox_id, path=path)
+    def read_file(self, sandbox_id: str, path: str, *, size: int | None = None) -> bytes:
+        """See `SpaceClient.read_file`. `size` is recorded but not needed."""
+        self._record("read_file", sandbox_id=sandbox_id, path=path, size=size)
         sandbox = self._running(sandbox_id)
         normalized = sandbox.normalize(path)
         if normalized in sandbox.dirs:

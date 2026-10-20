@@ -11,6 +11,7 @@ import httpx
 import pytest
 import respx
 
+from langchain_space.backend import SpaceSandbox
 from langchain_space.client import HttpSpaceClient, SpaceError
 from langchain_space.credentials import CredentialRule, RegisteredCredential, build_network_policy
 
@@ -174,6 +175,26 @@ class TestRunCommand:
         with pytest.raises(SpaceError, match="node lost"):
             client.run_command("sbx_1", ["true"])
 
+    def test_output_beyond_the_cap_is_drained_but_not_kept(self, mock: respx.MockRouter) -> None:
+        body = sse(
+            out("stdout", "hello ", 1),
+            out("stdout", "world", 2),
+            out("stdout", "!!!", 3),
+            {"type": "process_exited", "exit_code": 0, "status": "exited"},
+        )
+        mock_command(mock, body)
+        with HttpSpaceClient(API, DATA_PLANE, "tok", max_output_bytes=8) as capped:
+            result = capped.run_command("sbx_1", ["true"])
+        assert result.output == "hello wo"
+        assert result.truncated
+        assert result.exit_code == 0
+
+    def test_output_within_the_cap_is_not_truncated(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        mock_command(mock, sse(out("stdout", "ok", 1), {"type": "process_exited", "exit_code": 0}))
+        assert not client.run_command("sbx_1", ["true"]).truncated
+
     def test_stream_closing_without_exit_is_an_error(
         self, client: HttpSpaceClient, mock: respx.MockRouter
     ) -> None:
@@ -265,6 +286,39 @@ class TestFiles:
 
         assert client.read_file("sbx_1", "/f") == b"abcdef"
         assert [json.loads(c.request.content)["offset"] for c in read.calls] == [0, 4]
+
+    def test_read_file_with_known_size_skips_stat(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        stat = mock.post(f"{API}/v1/sandboxes/sbx_1/files:stat")
+        mock.post(f"{API}/v1/sandboxes/sbx_1/files:read").respond(200, content=b"ab")
+        assert client.read_file("sbx_1", "/f", size=2) == b"ab"
+        assert not stat.called
+
+    def test_download_costs_one_stat_and_one_read(self, mock: respx.MockRouter) -> None:
+        stat = mock.post(f"{API}/v1/sandboxes/sbx_1/files:stat").respond(
+            json={"entry": {"path": "/f", "file_type": "file", "size_bytes": 2}}
+        )
+        read = mock.post(f"{API}/v1/sandboxes/sbx_1/files:read").respond(200, content=b"ab")
+        with HttpSpaceClient(API, DATA_PLANE, "tok") as http:
+            [response] = SpaceSandbox(http, "sbx_1").download_files(["/f"])
+        assert response.content == b"ab"
+        assert (stat.call_count, read.call_count) == (1, 1)
+
+
+class TestPolling:
+    def test_polls_fast_first_then_backs_off_to_poll_interval(
+        self, mock: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sleeps: list[float] = []
+        monkeypatch.setattr("langchain_space.client.time.sleep", sleeps.append)
+        op = mock.get(f"{API}/v1/operations/op_1")
+        op.side_effect = [httpx.Response(200, json={"state": "running"})] * 6 + [
+            httpx.Response(200, json={"state": "succeeded"})
+        ]
+        with HttpSpaceClient(API, DATA_PLANE, "tok", poll_interval=0.5) as http:
+            http._wait_operation("op_1")
+        assert sleeps == [0.05, 0.1, 0.2, 0.4, 0.5, 0.5]
 
 
 class TestFork:

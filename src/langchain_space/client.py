@@ -28,6 +28,8 @@ from httpx_sse import connect_sse
 FileType = Literal["file", "directory", "symlink", "other"]
 
 MIB = 1024 * 1024
+_FIRST_POLL_DELAY = 0.05
+"""Seconds before the first re-poll; doubles up to `poll_interval` (fast ops finish fast)."""
 _TERMINAL_OPERATION_STATES = frozenset({"canceled", "expired", "failed", "succeeded"})
 _TERMINAL_SANDBOX_STATES = frozenset({"deleted", "deleting", "failed"})
 _SUSPEND_UPLOAD_CONFLICT = "suspend-snapshot upload in flight"
@@ -43,6 +45,8 @@ class CommandResult:
     """Process exit code; 124 on timeout, 128+n when killed by signal n."""
     status: str = "exited"
     """SPACE exit status: `exited`, `signaled`, `timed_out` or `unknown`."""
+    truncated: bool = False
+    """True when the client dropped output beyond its buffering limit."""
 
 
 @dataclass(frozen=True)
@@ -130,8 +134,12 @@ class SpaceClient(Protocol):
         """Create or replace the file at `path`. The parent directory must exist."""
         ...
 
-    def read_file(self, sandbox_id: str, path: str) -> bytes:
-        """Return the full contents of the file at `path`."""
+    def read_file(self, sandbox_id: str, path: str, *, size: int | None = None) -> bytes:
+        """Return the full contents of the file at `path`.
+
+        `size` is the file's size in bytes when the caller already knows it (e.g. from
+        `stat`), which saves the client from looking it up again.
+        """
         ...
 
     def stat(self, sandbox_id: str, path: str) -> FileStat:
@@ -191,6 +199,10 @@ class HttpSpaceClient:
         ecw_api_key: API key enabled for the `ecw` surface, sent as `X-API-Key`.
         default_command_timeout: Seconds used when `run_command(timeout=None)`.
         default_fork_lifetime: Seconds a forked sandbox may live when not specified.
+        ready_timeout: Seconds to wait for an operation or a sandbox state.
+        poll_interval: Longest pause between status polls (polling starts faster).
+        max_output_bytes: Command output kept in memory; the rest is read and dropped,
+            and the result is marked `truncated`.
         http: Optional preconfigured `httpx.Client` (tests inject a mocked transport).
     """
 
@@ -208,6 +220,7 @@ class HttpSpaceClient:
         poll_interval: float = 0.5,
         request_timeout: float = 60,
         chunk_size: int = 4 * MIB,
+        max_output_bytes: int = 8 * MIB,
         http: httpx.Client | None = None,
     ) -> None:
         self._api_url = api_url.rstrip("/")
@@ -223,6 +236,9 @@ class HttpSpaceClient:
         if not 0 < chunk_size <= 16 * MIB:
             raise ValueError("chunk_size must be in (0, 16 MiB]")
         self._chunk_size = chunk_size
+        if max_output_bytes < 0:
+            raise ValueError("max_output_bytes must be >= 0")
+        self._max_output_bytes = max_output_bytes
         self._retry = _Retry()
         self._owns_http = http is None
         self._http = http or httpx.Client(
@@ -398,6 +414,8 @@ class HttpSpaceClient:
         self, events_url: str, attach_token: str, read_timeout: float | None
     ) -> CommandResult:
         chunks: list[bytes] = []
+        kept = 0
+        truncated = False
         headers = {"Authorization": f"Bearer {attach_token}", "Accept": "text/event-stream"}
         timeout = httpx.Timeout(self._request_timeout, read=read_timeout)
         with connect_sse(self._http, "GET", events_url, headers=headers, timeout=timeout) as source:
@@ -410,13 +428,22 @@ class HttpSpaceClient:
                 frame = json.loads(event.data)
                 kind = frame.get("type") or event.event
                 if kind in ("stdout", "stderr"):
-                    chunks.append(base64.b64decode(_str(frame, "data_base64"), validate=True))
+                    data = base64.b64decode(_str(frame, "data_base64"), validate=True)
+                    # Keep draining past the cap (the process must reach `process_exited`)
+                    # but stop buffering, so a noisy command cannot exhaust host memory.
+                    room = self._max_output_bytes - kept
+                    if len(data) > room:
+                        data, truncated = data[: max(room, 0)], True
+                    if data:
+                        chunks.append(data)
+                        kept += len(data)
                 elif kind == "process_exited":
                     exit_code = frame.get("exit_code")
                     return CommandResult(
                         output=b"".join(chunks).decode("utf-8", errors="replace"),
                         exit_code=exit_code if isinstance(exit_code, int) else None,
                         status=str(frame.get("status", "unknown")),
+                        truncated=truncated,
                     )
                 elif kind in ("error", "resync_required"):
                     raise SpaceError(
@@ -451,9 +478,10 @@ class HttpSpaceClient:
                 mutation=True,
             )
 
-    def read_file(self, sandbox_id: str, path: str) -> bytes:
+    def read_file(self, sandbox_id: str, path: str, *, size: int | None = None) -> bytes:
         """See `SpaceClient.read_file`. Reads in chunks of at most `chunk_size` bytes."""
-        size = self.stat(sandbox_id, path).size_bytes
+        if size is None:
+            size = self.stat(sandbox_id, path).size_bytes
         parts: list[bytes] = []
         offset = 0
         while offset < size:
@@ -562,6 +590,7 @@ class HttpSpaceClient:
 
     def _poll(self, path: str, *, ready: str, terminal: frozenset[str]) -> dict[str, Any]:
         deadline = time.monotonic() + self._ready_timeout
+        delay = min(_FIRST_POLL_DELAY, self._poll_interval)
         while True:
             payload = self._json("GET", path)
             state = payload.get("state")
@@ -573,7 +602,8 @@ class HttpSpaceClient:
                     f"(last state {state!r})",
                     code="timeout",
                 )
-            time.sleep(self._poll_interval)
+            time.sleep(delay)
+            delay = min(delay * 2, self._poll_interval)
 
     def _best_effort_delete(self, sandbox_id: str) -> None:
         # Cleanup after a failed create must not mask the original error.

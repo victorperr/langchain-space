@@ -103,6 +103,12 @@ class TestUpload:
         assert responses[0].error is not None
         assert responses[1] == FileUploadResponse("/w/ok")
 
+    def test_one_mkdir_per_parent_directory(
+        self, fake: FakeSpaceClient, sandbox: SpaceSandbox
+    ) -> None:
+        sandbox.upload_files([("/w/a", b"1"), ("/w/b", b"2"), ("/w/sub/c", b"3")])
+        assert [c.args["path"] for c in fake.calls_to("mkdir")] == ["/w", "/w/sub"]
+
     def test_upload_bumps_generation(self, sandbox: SpaceSandbox) -> None:
         before = sandbox.generation
         sandbox.upload_files([("/w/x", b"1")])

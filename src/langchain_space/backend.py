@@ -189,9 +189,8 @@ class SpaceSandbox(BaseSandbox):
             self._sandbox_id, ["sh", "-c", command], timeout=effective_timeout
         )
         output = result.output
-        truncated = len(output) > self._max_output_chars
-        if truncated:
-            output = output[: self._max_output_chars]
+        truncated = result.truncated or len(output) > self._max_output_chars
+        output = output[: self._max_output_chars]
         return ExecuteResponse(output=output, exit_code=result.exit_code, truncated=truncated)
 
     # Read-only helpers: same commands as `BaseSandbox`, without marking the sandbox dirty.
@@ -255,6 +254,7 @@ class SpaceSandbox(BaseSandbox):
         if files:
             self._bump()
         responses: list[FileUploadResponse] = []
+        made_dirs: set[str] = set()  # one mkdir per parent directory, not per file
         for path, content in files:
             if not _is_absolute(path):
                 responses.append(FileUploadResponse(path, error=INVALID_PATH))
@@ -265,8 +265,9 @@ class SpaceSandbox(BaseSandbox):
                 continue
             try:
                 parent = posixpath.dirname(path)
-                if parent and parent != "/":
+                if parent and parent != "/" and parent not in made_dirs:
                     self._client.mkdir(self._sandbox_id, parent, parents=True)
+                    made_dirs.add(parent)
                 self._client.write_file(self._sandbox_id, path, content)
             except SpaceError as error:
                 responses.append(FileUploadResponse(path, error=_file_error(error)))
@@ -282,10 +283,11 @@ class SpaceSandbox(BaseSandbox):
                 responses.append(FileDownloadResponse(path, error=INVALID_PATH))
                 continue
             try:
-                if self._client.stat(self._sandbox_id, path).file_type == "directory":
+                stat = self._client.stat(self._sandbox_id, path)
+                if stat.file_type == "directory":
                     responses.append(FileDownloadResponse(path, error=IS_DIRECTORY))
                     continue
-                content = self._client.read_file(self._sandbox_id, path)
+                content = self._client.read_file(self._sandbox_id, path, size=stat.size_bytes)
             except SpaceError as error:
                 responses.append(FileDownloadResponse(path, error=_file_error(error)))
             else:
