@@ -46,6 +46,7 @@ from langchain_space.client import SpaceClient
 from langchain_space.snapshots import (
     ROOT_NS,
     SPACE_METADATA_KEY,
+    MissingSnapshotError,
     SandboxRegistry,
     SnapshotBinding,
     Snapshotter,
@@ -138,14 +139,28 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         return self.registry.sandbox(thread_id)
 
     def delete_unreferenced_anchors(self) -> list[str]:
-        """Delete anchors created by this process that no stored checkpoint references."""
-        referenced = {
-            SnapshotBinding.from_metadata(t.metadata).anchor_id for t in self.inner.list(None)
-        }
-        deleted = [a for a in self.registry.anchors if a not in referenced]
+        """Delete anchors created by this process that no checkpoint references.
+
+        Safe while runs are active: anchors a thread currently uses (including one whose
+        checkpoint is still being saved) and anchors created during the cleanup are kept.
+        Checkpoints in `inner` that were not saved by a `SpaceCheckpointer` are ignored.
+        """
+        # Only anchors that existed before listing are candidates; newer ones may belong
+        # to checkpoints the listing missed.
+        candidates = list(self.registry.anchors)
+        referenced = self.registry.anchors_in_use()
+        for stored in self.inner.list(None):
+            try:
+                anchor_id = SnapshotBinding.from_metadata(stored.metadata).anchor_id
+            except MissingSnapshotError:
+                continue
+            if anchor_id is not None:
+                referenced.add(anchor_id)
+        deleted = [a for a in candidates if a not in referenced]
         for anchor_id in deleted:
             self.client.delete_sandbox(anchor_id)
-        self.registry.anchors = [a for a in self.registry.anchors if a in referenced]
+        gone = set(deleted)
+        self.registry.anchors = [a for a in self.registry.anchors if a not in gone]
         return deleted
 
     def close(self) -> None:

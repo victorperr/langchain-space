@@ -323,6 +323,24 @@ class SandboxRegistry:
         with slot.changed:
             return self._materialize(slot)
 
+    def anchors_in_use(self) -> set[str]:
+        """Anchors a thread is positioned on or its live sandbox descends from.
+
+        This covers the anchor of a checkpoint that is being saved right now: `bind`
+        snapshots first and the checkpoint is stored after, so storage alone would not
+        show it yet.
+        """
+        with self._lock:
+            slots = list(self._threads.values())
+        used: set[str] = set()
+        for slot in slots:
+            with slot.changed:
+                if slot.live is not None and slot.live.anchor_id is not None:
+                    used.add(slot.live.anchor_id)
+                if slot.position_binding is not None and slot.position_binding.anchor_id:
+                    used.add(slot.position_binding.anchor_id)
+        return used
+
     def live_sandbox_id(self, thread_id: str) -> str | None:
         """The thread's materialized sandbox id, if any."""
         live = self._thread(thread_id).live

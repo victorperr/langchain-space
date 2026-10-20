@@ -276,3 +276,43 @@ def test_unreferenced_anchors_are_deleted(fake: FakeSpaceClient, saver: SpaceChe
 
     assert sorted(deleted) == sorted(anchors)
     assert fake.live_sandboxes == []
+
+
+def test_anchor_of_a_checkpoint_being_saved_is_kept(
+    fake: FakeSpaceClient, saver: SpaceCheckpointer
+) -> None:
+    graph = build_edit_graph(saver.backend, saver)
+    graph.invoke({"target": "v1"}, thread("t"))
+    latest = saver.get_tuple(thread("t"))
+    assert latest is not None
+
+    # Write-before-commit window: the snapshot exists, its checkpoint is not stored yet.
+    saver.sandbox("t").upload_files([(EDIT_FILE, b"v2")])
+    binding = saver.registry.bind("t", "", latest.config["configurable"]["checkpoint_id"], "next")
+    assert binding.anchor_id is not None
+
+    assert saver.delete_unreferenced_anchors() == []
+    assert fake.sandbox(binding.anchor_id).files[EDIT_FILE] == b"v2"
+
+
+def test_anchor_cleanup_ignores_checkpoints_saved_without_snapshots(
+    fake: FakeSpaceClient,
+) -> None:
+    class S(TypedDict):
+        n: int
+
+    storage = InMemorySaver()
+    builder = StateGraph(S)
+    builder.add_node("noop", lambda s: {})
+    builder.add_edge(START, "noop")
+    builder.add_edge("noop", END)
+    builder.compile(checkpointer=storage).invoke({"n": 0}, thread("other-app"))
+
+    saver = SpaceCheckpointer(storage, fake, template="code-runtime")
+    graph = build_edit_graph(saver.backend, saver)
+    graph.invoke({"target": "v1"}, thread("t"))
+    anchors = list(saver.registry.anchors)
+    saver.delete_thread("t")
+
+    assert anchors
+    assert saver.delete_unreferenced_anchors() == anchors
