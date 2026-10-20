@@ -18,9 +18,16 @@ from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from typing import Any
 
 from deepagents.backends.protocol import (
+    DeleteResult,
+    EditResult,
     ExecuteResponse,
     FileDownloadResponse,
     FileUploadResponse,
+    GlobResult,
+    GrepResult,
+    LsResult,
+    ReadResult,
+    WriteResult,
 )
 from deepagents.backends.sandbox import BaseSandbox
 from langchain_core.runnables import RunnableConfig
@@ -293,6 +300,9 @@ class ThreadRoutedSandbox(BaseSandbox):
     The thread and the checkpoint the running task is based on come from LangGraph's run
     config, so this backend only works inside a graph run. Each call first makes sure the
     thread's sandbox is in that checkpoint's state (see `langchain_space.snapshots`).
+
+    File operations (`ls`, `read`, `edit`, ...) are forwarded whole to that `SpaceSandbox`,
+    so each one resolves the sandbox once and read-only ones do not mark it dirty.
     """
 
     def __init__(self, registry: SandboxRegistry) -> None:
@@ -356,3 +366,92 @@ class ThreadRoutedSandbox(BaseSandbox):
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
         """Download from the current thread's sandbox."""
         return self._target().download_files(paths)
+
+    async def _atarget(self) -> SpaceSandbox:
+        # Resolving may wait for a checkpoint or fork a sandbox: keep it off the event loop.
+        # `to_thread` copies the context, so the run config is still visible there.
+        return await asyncio.to_thread(self._target)
+
+    # ------------------------------------------------------------------ file operations
+
+    def ls(self, path: str) -> LsResult:
+        """`ls` in the current thread's sandbox."""
+        return self._target().ls(path)
+
+    async def als(self, path: str) -> LsResult:
+        """Async `ls`."""
+        return await (await self._atarget()).als(path)
+
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        """`read` in the current thread's sandbox."""
+        return self._target().read(file_path, offset, limit)
+
+    async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        """Async `read`."""
+        return await (await self._atarget()).aread(file_path, offset, limit)
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        """`write` in the current thread's sandbox."""
+        return self._target().write(file_path, content)
+
+    async def awrite(self, file_path: str, content: str) -> WriteResult:
+        """Async `write`."""
+        return await (await self._atarget()).awrite(file_path, content)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        """`edit` in the current thread's sandbox."""
+        return self._target().edit(file_path, old_string, new_string, replace_all)
+
+    async def aedit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        """Async `edit`."""
+        return await (await self._atarget()).aedit(file_path, old_string, new_string, replace_all)
+
+    def delete(self, file_path: str) -> DeleteResult:
+        """`delete` in the current thread's sandbox."""
+        return self._target().delete(file_path)
+
+    async def adelete(self, file_path: str) -> DeleteResult:
+        """Async `delete`."""
+        return await (await self._atarget()).adelete(file_path)
+
+    def grep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        *,
+        max_count: int | None = None,
+    ) -> GrepResult:
+        """`grep` in the current thread's sandbox."""
+        return self._target().grep(pattern, path, glob, max_count=max_count)
+
+    async def agrep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        *,
+        max_count: int | None = None,
+    ) -> GrepResult:
+        """Async `grep`."""
+        return await (await self._atarget()).agrep(pattern, path, glob, max_count=max_count)
+
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """`glob` in the current thread's sandbox."""
+        return self._target().glob(pattern, path)
+
+    async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """Async `glob`."""
+        return await (await self._atarget()).aglob(pattern, path)

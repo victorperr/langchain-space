@@ -23,7 +23,8 @@ call first waits until the checkpoint its task is based on has been bound.
 
 **One snapshot per change, not per step.** `SpaceSandbox.generation` is bumped by every call
 that may write. Steps that don't touch the sandbox, such as most LLM turns, reuse the previous
-anchor.
+anchor. Deep Agents' `ls`, `read_file`, `grep` and `glob` run shell commands, but they only
+read, so they don't bump it: an agent step that just looks around costs no snapshot.
 
 **Write-before-commit.** The snapshot is taken before the checkpoint is saved. A checkpoint
 without a binding raises `MissingSnapshotError` and never falls back silently.

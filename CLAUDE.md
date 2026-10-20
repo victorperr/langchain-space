@@ -23,7 +23,9 @@ the state that matters.
 - **Anchor** = a suspended sandbox forked from the live sandbox. Never run again, only forked from.
   Each checkpoint stores `metadata["space"] = {template, anchor_id}` (`SnapshotBinding`);
   `anchor_id: None` means "pristine template", an explicit state, not a missing snapshot.
-- **Dirty tracking**: `SpaceSandbox.generation` is bumped by `execute` and `upload_files`. A new anchor
+- **Dirty tracking**: `SpaceSandbox.generation` is bumped by `execute` and `upload_files`, but not by
+  the read-only `BaseSandbox` helpers (`ls`, `read`, `grep`, `glob`), which run under a context flag;
+  `ThreadRoutedSandbox` forwards those helpers whole to the thread's sandbox. A new anchor
   is taken only if it changed since the last one (one snapshot per state change, not per superstep).
 - **Position comes from lineage, never from loads** (`SandboxRegistry` in `snapshots.py`). LangGraph
   calls `get_tuple` for pure inspection too (e.g. `checkpoint_superseded` probes the latest), so loads

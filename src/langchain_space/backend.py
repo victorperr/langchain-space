@@ -5,9 +5,11 @@ This module must not import LangGraph, so it stays usable from a plain script.
 
 from __future__ import annotations
 
+import contextlib
 import posixpath
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextvars import ContextVar
 from typing import Any
 
 from deepagents.backends.protocol import (
@@ -18,6 +20,10 @@ from deepagents.backends.protocol import (
     ExecuteResponse,
     FileDownloadResponse,
     FileUploadResponse,
+    GlobResult,
+    GrepResult,
+    LsResult,
+    ReadResult,
 )
 from deepagents.backends.sandbox import BaseSandbox
 
@@ -27,6 +33,23 @@ DEFAULT_MAX_OUTPUT_CHARS = 200_000
 
 ContentCheck = Callable[[bytes, str], None]
 """`(content, where) -> None`; raises to block content from being sent into the sandbox."""
+
+_READ_ONLY: ContextVar[bool] = ContextVar("langchain_space_read_only", default=False)
+"""Set while a `BaseSandbox` helper that only reads (`ls`, `read`, `grep`, `glob`) runs.
+
+Those helpers are built on `execute`; the flag stops them from bumping `generation`. A
+context variable (not a thread-local) so it also reaches the worker thread that
+`aexecute` runs `execute` in.
+"""
+
+
+@contextlib.contextmanager
+def _read_only() -> Iterator[None]:
+    token = _READ_ONLY.set(True)
+    try:
+        yield
+    finally:
+        _READ_ONLY.reset(token)
 
 
 class SpaceSandbox(BaseSandbox):
@@ -38,7 +61,9 @@ class SpaceSandbox(BaseSandbox):
 
     Every call that can change the filesystem (`execute`, `upload_files`) bumps
     `generation`, so snapshot logic can tell whether anything changed since the last
-    snapshot without asking SPACE.
+    snapshot without asking SPACE. The read-only helpers `ls`, `read`, `grep` and `glob`
+    run commands too, but do not bump it, so an agent step that only reads files does not
+    cost a snapshot.
 
     Args:
         client: Any `SpaceClient` (the HTTP client, or the fake in tests).
@@ -130,8 +155,9 @@ class SpaceSandbox(BaseSandbox):
         blocked = self._blocked(command.encode(), "command")
         if blocked is not None:
             return ExecuteResponse(output=blocked, exit_code=126)
-        # Bump before running: a command that fails halfway may still have written files.
-        self._bump()
+        if not _READ_ONLY.get():
+            # Bump before running: a command that fails halfway may still have written files.
+            self._bump()
         effective_timeout = timeout if timeout is not None else self._default_timeout
         result = self._client.run_command(
             self._sandbox_id, ["sh", "-c", command], timeout=effective_timeout
@@ -141,6 +167,62 @@ class SpaceSandbox(BaseSandbox):
         if truncated:
             output = output[: self._max_output_chars]
         return ExecuteResponse(output=output, exit_code=result.exit_code, truncated=truncated)
+
+    # Read-only helpers: same commands as `BaseSandbox`, without marking the sandbox dirty.
+
+    def ls(self, path: str) -> LsResult:
+        """See `BaseSandbox.ls`; does not bump `generation`."""
+        with _read_only():
+            return super().ls(path)
+
+    async def als(self, path: str) -> LsResult:
+        """See `BaseSandbox.als`; does not bump `generation`."""
+        with _read_only():
+            return await super().als(path)
+
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        """See `BaseSandbox.read`; does not bump `generation`."""
+        with _read_only():
+            return super().read(file_path, offset, limit)
+
+    async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        """See `BaseSandbox.aread`; does not bump `generation`."""
+        with _read_only():
+            return await super().aread(file_path, offset, limit)
+
+    def grep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        *,
+        max_count: int | None = None,
+    ) -> GrepResult:
+        """See `BaseSandbox.grep`; does not bump `generation`."""
+        with _read_only():
+            return super().grep(pattern, path, glob, max_count=max_count)
+
+    async def agrep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        *,
+        max_count: int | None = None,
+    ) -> GrepResult:
+        """See `BaseSandbox.agrep`; does not bump `generation`."""
+        with _read_only():
+            return await super().agrep(pattern, path, glob, max_count=max_count)
+
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """See `BaseSandbox.glob`; does not bump `generation`."""
+        with _read_only():
+            return super().glob(pattern, path)
+
+    async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:
+        """See `BaseSandbox.aglob`; does not bump `generation`."""
+        with _read_only():
+            return await super().aglob(pattern, path)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         """Write each file, creating parent directories. Errors are reported per file."""

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -55,6 +55,94 @@ def test_no_snapshot_when_sandbox_unchanged(fake: FakeSpaceClient) -> None:
 
     assert fake.calls_to("fork") == []
     assert fake.calls_to("create_sandbox") == []  # sandboxes are created lazily
+
+
+def _read_mostly_graph(saver: SpaceCheckpointer) -> Any:
+    """`START -> work -> END`; `work` writes a file on the first run, then only reads."""
+
+    class S(TypedDict):
+        n: int
+
+    def work(state: S) -> S:
+        backend = saver.backend
+        if state["n"] == 0:
+            backend.upload_files([(EDIT_FILE, b"v1")])
+        backend.ls("/home/user")
+        backend.read(EDIT_FILE)
+        backend.grep("v1", "/home/user")
+        backend.glob("*.txt", "/home/user")
+        return {"n": state["n"] + 1}
+
+    builder = StateGraph(S)
+    builder.add_node("work", work)
+    builder.add_edge(START, "work")
+    builder.add_edge("work", END)
+    return builder.compile(checkpointer=saver)
+
+
+def test_read_only_steps_take_no_snapshot(fake: FakeSpaceClient, saver: SpaceCheckpointer) -> None:
+    graph = _read_mostly_graph(saver)
+    for n in range(3):
+        graph.invoke({"n": n}, thread("t"))
+    assert fake.calls_to("run_command")  # the reads did reach the sandbox
+    assert len(saver.registry.anchors) == 1  # only the step that wrote was snapshotted
+
+
+async def test_async_read_only_steps_take_no_snapshot(
+    fake: FakeSpaceClient, saver: SpaceCheckpointer
+) -> None:
+    class S(TypedDict):
+        n: int
+
+    async def work(state: S) -> S:
+        backend = saver.backend
+        if state["n"] == 0:
+            await backend.aupload_files([(EDIT_FILE, b"v1")])
+        await backend.als("/home/user")
+        await backend.aread(EDIT_FILE)
+        await backend.agrep("v1", "/home/user")
+        await backend.aglob("*.txt", "/home/user")
+        return {"n": state["n"] + 1}
+
+    builder = StateGraph(S)
+    builder.add_node("work", work)
+    builder.add_edge(START, "work")
+    builder.add_edge("work", END)
+    graph = builder.compile(checkpointer=saver)
+    for n in range(3):
+        await graph.ainvoke({"n": n}, thread("t"))
+    assert fake.calls_to("run_command")
+    assert len(saver.registry.anchors) == 1
+
+
+def test_routed_write_resolves_the_sandbox_once() -> None:
+    # `write` is a mkdir command plus an upload; the routed backend forwards it whole.
+    fake = FakeSpaceClient(lambda sandbox, argv: ("", 0))
+    saver = SpaceCheckpointer(InMemorySaver(), fake, template="code-runtime")
+    acquired: list[str | None] = []
+    original = saver.registry.acquire
+
+    def counting(thread_id: str, base: str | None) -> Any:
+        acquired.append(base)
+        return original(thread_id, base)
+
+    saver.registry.acquire = counting  # type: ignore[method-assign]
+
+    class S(TypedDict):
+        ok: bool
+
+    def work(state: S) -> S:
+        return {"ok": saver.backend.write(EDIT_FILE, "v1").error is None}
+
+    builder = StateGraph(S)
+    builder.add_node("work", work)
+    builder.add_edge(START, "work")
+    builder.add_edge("work", END)
+    result = builder.compile(checkpointer=saver).invoke({"ok": False}, thread("t"))
+
+    assert result["ok"]
+    assert len(acquired) == 1
+    assert fake.calls_to("write_file")
 
 
 def test_one_snapshot_per_state_change(fake: FakeSpaceClient, saver: SpaceCheckpointer) -> None:

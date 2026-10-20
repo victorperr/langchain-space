@@ -49,6 +49,32 @@ class TestExecute:
         sandbox.execute("ls")
         assert sandbox.generation == before + 1
 
+    def test_read_only_helpers_do_not_bump_generation(
+        self, fake: FakeSpaceClient, sandbox: SpaceSandbox
+    ) -> None:
+        before = sandbox.generation
+        sandbox.ls("/home/user")
+        sandbox.read("/home/user/a.txt")
+        sandbox.grep("needle", "/home/user")
+        sandbox.glob("*.py", "/home/user")
+        assert len(fake.calls_to("run_command")) == 4  # they did run commands
+        assert sandbox.generation == before
+        sandbox.execute("touch x")  # the flag does not leak past the helper
+        assert sandbox.generation == before + 1
+
+    async def test_async_read_only_helpers_do_not_bump_generation(
+        self, fake: FakeSpaceClient, sandbox: SpaceSandbox
+    ) -> None:
+        before = sandbox.generation
+        await sandbox.als("/home/user")
+        await sandbox.aread("/home/user/a.txt")
+        await sandbox.agrep("needle", "/home/user")
+        await sandbox.aglob("*.py", "/home/user")
+        assert len(fake.calls_to("run_command")) == 4
+        assert sandbox.generation == before
+        await sandbox.aexecute("touch x")
+        assert sandbox.generation == before + 1
+
     def test_id_is_the_sandbox_id(self, fake: FakeSpaceClient, sandbox: SpaceSandbox) -> None:
         assert sandbox.id in fake.sandboxes
 
