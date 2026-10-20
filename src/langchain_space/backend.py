@@ -34,6 +34,13 @@ DEFAULT_MAX_OUTPUT_CHARS = 200_000
 ContentCheck = Callable[[bytes, str], None]
 """`(content, where) -> None`; raises to block content from being sent into the sandbox."""
 
+
+def check_env(check: ContentCheck, env: Mapping[str, str], where: str = "sandbox env") -> None:
+    """Run `check` on every `KEY=value` pair of `env`; raises whatever `check` raises."""
+    for key, value in env.items():
+        check(f"{key}={value}".encode(), where)
+
+
 _READ_ONLY: ContextVar[bool] = ContextVar("langchain_space_read_only", default=False)
 """Set while a `BaseSandbox` helper that only reads (`ls`, `read`, `grep`, `glob`) runs.
 
@@ -116,8 +123,7 @@ class SpaceSandbox(BaseSandbox):
         """
         check: ContentCheck | None = kwargs.get("content_check")
         if check is not None:
-            for key, value in (env or {}).items():
-                check(f"{key}={value}".encode(), "sandbox env")
+            check_env(check, env or {})
         sandbox_id = client.create_sandbox(template, env=env, network_policy=network_policy)
         return cls(client, sandbox_id, owns_sandbox=True, network_policy=network_policy, **kwargs)
 

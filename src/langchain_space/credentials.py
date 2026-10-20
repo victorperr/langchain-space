@@ -26,6 +26,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from langchain_space.backend import check_env
 from langchain_space.client import SpaceClient
 
 HttpMethod = Literal["GET", "POST", "HEAD"]
@@ -196,5 +197,4 @@ class SecretGuard:
 
     def check_mapping(self, values: Mapping[str, str], where: str) -> None:
         """Check every key and value of a mapping (e.g. sandbox env)."""
-        for key, value in values.items():
-            self(f"{key}={value}".encode(), where)
+        check_env(self, values, where)

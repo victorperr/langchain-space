@@ -42,7 +42,7 @@ from langgraph.checkpoint.base import (
 )
 from langgraph.config import get_config
 
-from langchain_space.backend import SpaceSandbox
+from langchain_space.backend import SpaceSandbox, check_env
 from langchain_space.client import SpaceClient
 from langchain_space.snapshots import (
     ROOT_NS,
@@ -94,8 +94,7 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         self._delete_retired_eagerly = delete_retired_eagerly
         content_check = (backend_kwargs or {}).get("content_check")
         if content_check is not None:
-            for key, value in (env or {}).items():
-                content_check(f"{key}={value}".encode(), "sandbox env")
+            check_env(content_check, env or {})
         self.inner = inner
         self.client = client
         snapshotter = Snapshotter(
