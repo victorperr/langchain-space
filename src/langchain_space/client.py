@@ -363,9 +363,18 @@ class HttpSpaceClient:
         if not isinstance(results, list) or len(results) != 1:
             raise SpaceError(f"unexpected fork response: {results!r}", code="invalid_response")
         result = results[0]
+        if not isinstance(result, dict):
+            raise SpaceError(f"unexpected fork result: {result!r}", code="invalid_response")
         if "error" in result:
             err = result["error"]
-            raise SpaceError(str(err.get("message", "fork failed")), code=str(err.get("code")))
+            if isinstance(err, dict):
+                message, code = err.get("message"), err.get("code")
+            else:
+                message, code = err, None
+            raise SpaceError(
+                str(message or "fork failed"),
+                code=str(code) if code is not None else "fork_failed",
+            )
         child_id = _str(result, "sandboxID")
         self._wait_running(child_id)
         return child_id

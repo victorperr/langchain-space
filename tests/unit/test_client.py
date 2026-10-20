@@ -347,6 +347,22 @@ class TestFork:
         with pytest.raises(SpaceError, match="capture failed"):
             client.fork("sbx_1")
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            [{"error": "capture failed"}],
+            ["sbx_child"],
+            [{"error": {"message": "x"}, "sandboxID": 7}],
+            {"sandboxID": "sbx_child"},
+        ],
+    )
+    def test_malformed_fork_response_is_a_space_error(
+        self, client: HttpSpaceClient, mock: respx.MockRouter, body: Any
+    ) -> None:
+        mock.post(f"{ECW}/sandboxes/sbx_1/fork").respond(201, json=body)
+        with pytest.raises(SpaceError):
+            client.fork("sbx_1")
+
     def test_fork_requires_ecw_configuration(self) -> None:
         with HttpSpaceClient(API, DATA_PLANE, "tok") as plain, pytest.raises(SpaceError) as info:
             plain.fork("sbx_1")
