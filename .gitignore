@@ -1,0 +1,31 @@
+# Vendored SPACE source (read-only reference, has its own .git)
+/SPACE/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local env / secrets
+.env
+.env.*
+
+# Benchmark outputs
+benchmarks/results/
+
+# Editor / Claude Code local state
+.vscode/
+.claude/settings.local.json
+
+# Claude Code planning notes (kept local)
+/.claude/plans/
