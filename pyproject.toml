@@ -8,8 +8,9 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Victor" }]
 dependencies = [
-    "deepagents>=0.2",
-    "langgraph>=1.0",
+    "deepagents>=0.7",
+    "langgraph>=1.2",
+    "langgraph-checkpoint>=4.3",
     "langchain-core>=1.0",
     "httpx>=0.27",
     "httpx-sse>=0.4",
