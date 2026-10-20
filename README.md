@@ -61,7 +61,9 @@ each task knows the checkpoint it runs on top of. When checkpoint X with parent 
   is immediately suspended and never run again.
 - Otherwise the thread jumped (rewind, replay, `update_state`, fork), and X binds to P's
   snapshot. The next tool call forks a fresh sandbox from it. The previous sandbox is retired,
-  never mutated.
+  never mutated. Retired sandboxes keep running until `saver.close()`; pass
+  `delete_retired_eagerly=True` to delete them once the next checkpoint is saved (useful for
+  long-lived servers).
 
 The snapshot is taken before the checkpoint is written. If it fails, the checkpoint is not
 saved.

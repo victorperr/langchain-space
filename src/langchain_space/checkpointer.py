@@ -14,6 +14,7 @@ snapshot. See `langchain_space.snapshots` for how checkpoints are bound to snaps
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from typing import Any
 
@@ -71,6 +72,10 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         network_policy: SPACE network policy for every sandbox of every thread.
         anchor_lifetime_seconds: Lifetime requested for snapshot anchors.
         backend_kwargs: Extra arguments for each `SpaceSandbox` (e.g. `default_timeout`).
+        delete_retired_eagerly: Delete sandboxes left behind by a rewind or fork as soon
+            as the next checkpoint is saved, instead of keeping them running until
+            `close()`. Recommended for long-lived servers; leave it off if several runs may
+            use the same thread at once.
     """
 
     def __init__(
@@ -83,8 +88,10 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         network_policy: Mapping[str, Any] | None = None,
         anchor_lifetime_seconds: int | None = None,
         backend_kwargs: Mapping[str, Any] | None = None,
+        delete_retired_eagerly: bool = False,
     ) -> None:
         super().__init__(serde=inner.serde)
+        self._delete_retired_eagerly = delete_retired_eagerly
         content_check = (backend_kwargs or {}).get("content_check")
         if content_check is not None:
             for key, value in (env or {}).items():
@@ -126,6 +133,12 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
             }
         )
         return SnapshotBinding.from_metadata(stored.metadata) if stored is not None else None
+
+    def _after_save(self) -> None:
+        if self._delete_retired_eagerly and self.registry.retired:
+            # Best effort: a failed delete stays in `retired` and is retried next time.
+            with contextlib.suppress(Exception):
+                self.registry.delete_retired()
 
     @staticmethod
     def _validate(checkpoint_tuple: CheckpointTuple | None) -> None:
@@ -204,7 +217,9 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
     ) -> RunnableConfig:
         """Snapshot first, then save the checkpoint with its snapshot (write-before-commit)."""
         bound = {**metadata, **self._bind(config, checkpoint)}
-        return self.inner.put(config, checkpoint, bound, new_versions)  # type: ignore[arg-type]
+        saved = self.inner.put(config, checkpoint, bound, new_versions)  # type: ignore[arg-type]
+        self._after_save()
+        return saved
 
     def put_writes(
         self,
@@ -273,7 +288,9 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         """Async `put`. The snapshot (blocking SPACE calls) runs in a worker thread."""
         binding = await asyncio.to_thread(self._bind, config, checkpoint)
         bound = {**metadata, **binding}
-        return await self.inner.aput(config, checkpoint, bound, new_versions)  # type: ignore[arg-type]
+        saved = await self.inner.aput(config, checkpoint, bound, new_versions)  # type: ignore[arg-type]
+        await asyncio.to_thread(self._after_save)
+        return saved
 
     async def aput_writes(
         self,

@@ -354,9 +354,23 @@ class SandboxRegistry:
             self.retired.append(slot.live.backend.id)
 
     def delete_retired(self) -> None:
-        """Delete live sandboxes no thread uses anymore. Anchors are kept."""
+        """Delete live sandboxes no thread uses anymore. Anchors are kept.
+
+        Sandboxes whose delete fails stay in `retired` for the next attempt; the first
+        error is raised after trying all of them.
+        """
+        failed: list[str] = []
+        first_error: Exception | None = None
         while self.retired:
-            self.snapshotter.client.delete_sandbox(self.retired.pop())
+            sandbox_id = self.retired.pop()
+            try:
+                self.snapshotter.client.delete_sandbox(sandbox_id)
+            except Exception as error:
+                failed.append(sandbox_id)
+                first_error = first_error or error
+        self.retired.extend(failed)
+        if first_error is not None:
+            raise first_error
 
     def close(self) -> None:
         """Delete every live and retired sandbox. Anchors are kept, so stored checkpoints

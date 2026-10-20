@@ -189,6 +189,39 @@ def test_rewind_forks_new_sandbox_and_leaves_old_one_untouched(
     assert file_in(fake, new_live) == b"v9"
 
 
+def test_retired_sandboxes_can_be_deleted_eagerly(fake: FakeSpaceClient) -> None:
+    saver = SpaceCheckpointer(
+        InMemorySaver(), fake, template="code-runtime", delete_retired_eagerly=True
+    )
+    graph = build_edit_graph(saver.backend, saver)
+    for target in ("v1", "v2"):
+        graph.invoke({"target": target}, thread("t"))
+    old_live = saver.registry.live_sandbox_id("t")
+    assert old_live is not None
+
+    after_v1 = find_state(graph, "t", target="v1", finished=True)
+    graph.invoke({"target": "v9"}, after_v1.config)
+
+    assert fake.sandboxes[old_live].state == "deleted"
+    assert saver.registry.retired == []
+    assert file_in(fake, saver.registry.live_sandbox_id("t") or "") == b"v9"
+
+
+def test_failed_retired_delete_is_kept_for_the_next_attempt(
+    fake: FakeSpaceClient, saver: SpaceCheckpointer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saver.registry.retired.extend(["sbx_a", "sbx_b"])
+
+    def flaky(sandbox_id: str) -> None:
+        if sandbox_id == "sbx_a":
+            raise SpaceError("busy", code="conflict")
+
+    monkeypatch.setattr(fake, "delete_sandbox", flaky)
+    with pytest.raises(SpaceError, match="busy"):
+        saver.registry.delete_retired()
+    assert saver.registry.retired == ["sbx_a"]
+
+
 def test_anchors_are_never_written(fake: FakeSpaceClient, saver: SpaceCheckpointer) -> None:
     graph = build_edit_graph(saver.backend, saver)
     for target in ("v1", "v2", "v3"):
