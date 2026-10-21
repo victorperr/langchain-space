@@ -1,8 +1,17 @@
-# langchain-space
+<a id="readme-top"></a>
 
-A [LangChain Deep Agents](https://github.com/langchain-ai/deepagents) sandbox backend for
-[SPACE](https://github.com/perplexityai/SPACE), Perplexity's open-source Firecracker microVM
-platform, where **rewinding or forking a LangGraph thread also rewinds or forks the sandbox**.
+<!-- PROJECT SHIELDS -->
+
+![Python](https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white)
+
+<!-- PROJECT LOGO -->
+<br />
+<div align="center">
+<h3 align="center">langchain-space</h3>
+</div>
+
+A [LangChain Deep Agents](https://github.com/langchain-ai/deepagents) sandbox backend for [SPACE](https://github.com/perplexityai/SPACE), Perplexity's open-source Firecracker microVM platform, where **rewinding or forking a LangGraph thread also rewinds or forks the sandbox**.
+
 
 ## Problem
 
@@ -68,6 +77,8 @@ each task knows the checkpoint it runs on top of. When checkpoint X with parent 
 
 The snapshot is taken before the checkpoint is written. If it fails, the checkpoint is not
 saved.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ## Quickstart
 
@@ -184,3 +195,11 @@ uv run pytest -m integration                   # needs SPACE_* environment varia
 | `src/langchain_space/credentials.py` | Credential rules, network policies, `SecretGuard` |
 | `src/langchain_space/testing/` | `FakeSpaceClient` and the consistency harness graph |
 | `tests/consistency/` | The core claim: the bug with a plain backend, the fix with ours |
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+
+
+
+<!-- MARKDOWN LINKS & IMAGES -->
+<!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->

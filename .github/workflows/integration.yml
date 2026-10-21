@@ -1,0 +1,218 @@
+name: Integration (real SPACE)
+
+# Brings up SPACE in a Kind cluster on a GitHub-hosted runner, following SPACE's
+# docs/installation.md, then runs the integration tests and benchmarks against it.
+# Manual only: a cold run compiles SPACE from source and can take a few hours.
+# Credential-injection tests skip themselves (they need AWS Secrets Manager).
+
+on:
+  workflow_dispatch:
+    inputs:
+      space_ref:
+        description: SPACE commit, tag or branch to install
+        default: b6ca1b2a112759d69562e1a63488ccc62935fb0e
+      template:
+        description: Sandbox template the tests use
+        type: choice
+        options: [code-runtime, seed]
+        default: code-runtime
+      run_benchmarks:
+        description: Run benchmarks/run.py --space after the tests
+        type: boolean
+        default: true
+      benchmark_runs:
+        description: Samples per latency benchmark
+        default: "10"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-space
+  cancel-in-progress: false
+
+env:
+  SPACE_KIND_CLUSTER: space-local
+  SPACE_KIND_TELEMETRY_MODE: "off"
+  SPACE_API_URL: http://127.0.0.1:8080
+  SPACE_DATA_PLANE_URL: http://127.0.0.1:8090
+  # On Kind, SPACE serves its E2B-compatible API (which serves forks) on the main API port
+  # for Host 127.0.0.1: see ecwHosts in SPACE's infra/space/kind/charts/space-api-local/values.yaml.
+  SPACE_ECW_API_URL: http://127.0.0.1:8080
+  SPACE_TEMPLATE: ${{ inputs.template }}
+  # Seeded by SPACE's baseline migration (db/postgres/*_baseline.up.sql): the Local org and root@local.
+  SPACE_LOCAL_ORG_ID: 00000000-0000-0000-0000-000000000001
+  SPACE_ROOT_USER_ID: 00000000-0000-0000-0000-000000000010
+
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out SPACE
+        uses: actions/checkout@v4
+        with:
+          repository: perplexityai/SPACE
+          ref: ${{ inputs.space_ref }}
+          path: SPACE
+          persist-credentials: false
+
+      - name: Record the machine
+        run: |
+          {
+            echo "## Machine"
+            echo
+            echo "- Runner: \`${RUNNER_NAME}\` (${ImageOS:-unknown} ${ImageVersion:-})"
+            echo "- CPU: $(lscpu | sed -n 's/^Model name: *//p') x $(nproc)"
+            echo "- Memory: $(free -g | awk '/^Mem:/ {print $2}') GiB"
+            echo "- SPACE: \`$(git -C SPACE rev-parse HEAD)\`"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Free disk space
+        run: |
+          df -h / /mnt
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift
+          docker system prune -af >/dev/null
+          # Kind nodes keep their containerd image stores here; /mnt is a separate disk.
+          sudo install -d -m 0755 -o "$USER" -g "$(id -gn)" /mnt/kind-data
+          echo "SPACE_KIND_DATA_ROOT=/mnt/kind-data" >>"$GITHUB_ENV"
+          df -h / /mnt
+
+      - name: Enable KVM access
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle
+          for device in /dev/kvm /dev/net/tun; do
+            [[ -c "$device" ]] || { echo "::error::The runner does not expose $device"; exit 1; }
+          done
+          [[ -r /dev/kvm && -w /dev/kvm ]] || { echo "::error::/dev/kvm is not read-writable"; exit 1; }
+
+      - name: Install SPACE prerequisites
+        working-directory: SPACE
+        run: |
+          sudo install -d -m 0755 -o "$USER" -g "$(id -gn)" /home/dev
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+          INSTALL_DIR="$HOME/.local/bin" bash infra/space/kind/scripts/install-prereqs.sh
+
+      - name: Build and deploy SPACE
+        working-directory: SPACE
+        run: |
+          export SPACE_VENDOR_ROOT="$HOME/.local/share/space/vendor"
+          time bash infra/space/kind/scripts/install-fc-vendor.sh
+          time bash infra/space/kind/scripts/bootstrap.sh
+
+      - name: Wait for the seed template and node services
+        working-directory: SPACE
+        run: |
+          kubectl --context kind-space-local -n space get pods
+          kubectl --context kind-space-local -n space \
+            wait --for=condition=complete job/space-seed-publish --timeout=600s
+          for ds in $(bash infra/space/kind/lib/node-services.sh daemonsets); do
+            kubectl --context kind-space-local -n space rollout status "ds/$ds" --timeout=600s
+          done
+          curl -fsS --max-time 15 "$SPACE_API_URL/openapi-m1.json" | jq -e '.openapi and .paths' >/dev/null
+          for _ in $(seq 1 150); do
+            curl -sf -m 2 "$SPACE_DATA_PLANE_URL/healthz" >/dev/null && exit 0
+            sleep 2
+          done
+          echo "::error::The data plane never became healthy"
+          exit 1
+
+      - name: Create an API key for the fork API
+        working-directory: SPACE
+        run: |
+          key="lcs_ci_$(openssl rand -hex 32)"
+          echo "::add-mask::$key"
+          key_file="$RUNNER_TEMP/ecw-key"
+          (umask 077 && printf '%s' "$key" >"$key_file")
+          # Same organization as root@local, so forked sandboxes are visible to the native API.
+          bash scripts/seed-api-key.sh \
+            --org-id "$SPACE_LOCAL_ORG_ID" --created-by "$SPACE_ROOT_USER_ID" \
+            --name langchain-space-ci --token-file "$key_file" \
+            --execute --context kind-space-local --namespace space
+          echo "SPACE_ECW_API_KEY=$key" >>"$GITHUB_ENV"
+          code="$(printf 'header = "x-api-key: %s"\n' "$key" \
+            | curl -s -o /dev/null -w '%{http_code}' --config - "$SPACE_ECW_API_URL/sandboxes")"
+          echo "E2B-compatible GET /sandboxes -> HTTP $code"
+          [[ "$code" == 200 ]] || { echo "::error::The fork API did not accept the key"; exit 1; }
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+
+      - name: Build the code-runtime template
+        if: inputs.template == 'code-runtime'
+        working-directory: SPACE
+        timeout-minutes: 120
+        run: |
+          export E2B_API_KEY="$SPACE_ECW_API_KEY"
+          uv run --script scripts/build-code-runtime.py \
+            --domain local.e2b.test --api-url "$SPACE_ECW_API_URL" --skip-sandbox-check
+
+      - name: Install langchain-space
+        run: uv sync --locked
+
+      - name: Log in to SPACE
+        run: &login |
+          token="$(curl -fsS --max-time 15 -X POST "$SPACE_API_URL/auth/v1/sessions" \
+            -H 'content-type: application/json' \
+            -d '{"email":"root@local","password":"password"}' | jq -er '.token')"
+          echo "::add-mask::$token"
+          echo "SPACE_API_TOKEN=$token" >>"$GITHUB_ENV"
+
+      - name: Run integration tests
+        id: tests
+        run: |
+          uv run pytest -m integration tests/integration -v -rs \
+            --junitxml=integration-results.xml
+
+      - name: Log in to SPACE again
+        if: ${{ !cancelled() && inputs.run_benchmarks && steps.tests.outcome != 'skipped' }}
+        run: *login
+
+      - name: Run benchmarks
+        if: ${{ !cancelled() && inputs.run_benchmarks && steps.tests.outcome != 'skipped' }}
+        env:
+          BENCHMARK_RUNS: ${{ inputs.benchmark_runs }}
+        run: |
+          uv run python benchmarks/run.py --space --template "$SPACE_TEMPLATE" \
+            --runs "$BENCHMARK_RUNS" | tee benchmark-table.md
+          { echo "## Benchmarks"; echo; cat benchmark-table.md; } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Collect SPACE diagnostics
+        if: failure()
+        timeout-minutes: 5
+        run: |
+          dir="$RUNNER_TEMP/space-diagnostics"
+          mkdir -p "$dir"
+          k() { timeout "$1" kubectl --context kind-space-local "${@:2}"; }
+          k 30s get pods -A -o wide >"$dir/pods.txt" 2>&1 || true
+          k 30s get events -A --sort-by=.lastTimestamp >"$dir/events.txt" 2>&1 || true
+          for pod in $(k 30s -n space get pods -o name 2>/dev/null); do
+            k 45s -n space logs "$pod" --all-containers --prefix --tail=300 \
+              >"$dir/${pod#pod/}.log" 2>&1 || true
+          done
+          df -h >"$dir/df.txt"; free -m >"$dir/free.txt"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-results
+          path: |
+            integration-results.xml
+            benchmark-table.md
+            benchmarks/results/
+            ${{ runner.temp }}/space-diagnostics/
+          if-no-files-found: ignore
+          retention-days: 30

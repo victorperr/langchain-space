@@ -79,6 +79,10 @@ SPACE/             # vendored SPACE source (own .git); excluded from git, ruff, 
   (subclasses `langchain_tests.integration_tests.SandboxIntegrationTests`; mirror the Daytona partner
   package in the deepagents repo)
 - Benchmarks: `uv run python benchmarks/run.py`
+- Real SPACE without a Linux machine: run the manual GitHub Actions workflow
+  [.github/workflows/integration.yml](.github/workflows/integration.yml) (`gh workflow run integration.yml`).
+  It installs SPACE in Kind on a free `ubuntu-24.04` runner, builds `code-runtime`, runs
+  `pytest -m integration` and `benchmarks/run.py --space`, and uploads results as an artifact.
 
 Run lint, types, unit and consistency tests before saying any change is done.
 
@@ -141,7 +145,11 @@ There is no SPACE Python SDK; we call the HTTP API with `httpx` + `httpx-sse`.
   Example: `SPACE/space_smoke/scenarios/native_aws_secret_network_credential_injection.py`.
 
 ### Open questions (resolve on a real SPACE host, then move into the notes above)
-- Is the E2B fork route reachable on a local Kind install without ECW wildcard hosts? Which auth header?
+- E2B fork route on Kind: from source, the Kind chart lists `127.0.0.1` as an ECW `apiHost`
+  (`infra/space/kind/charts/space-api-local/values.yaml`, port stripped by `routes/e2b/hosts.rs`), so
+  `SPACE_ECW_API_URL=http://127.0.0.1:8080` should work; auth is `X-API-Key`, seeded with
+  `scripts/seed-api-key.sh --org-id <org> --created-by <user> --execute` (key must be in the same org as
+  the native token). Confirm with a run of the integration workflow.
 - Fork latency from a suspended anchor; does the child come up `running` or need `:wake`?
   (`HttpSpaceClient.fork` currently waits for `running`.)
 - The fork `timeout` is the child's lifetime (u32 seconds, default 300; only `> 0` is validated). Does it
