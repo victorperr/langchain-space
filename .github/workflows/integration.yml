@@ -26,6 +26,8 @@ on:
 
 permissions:
   contents: read
+  # Lets SPACE's scripts read its GHCR image mirror when that package is readable.
+  packages: read
 
 concurrency:
   group: integration-space
@@ -34,6 +36,8 @@ concurrency:
 env:
   SPACE_KIND_CLUSTER: space-local
   SPACE_KIND_TELEMETRY_MODE: "off"
+  # Builds take their base images from SPACE's GHCR mirror when readable, else from the source.
+  SPACE_CI_IMAGE_MIRROR: ghcr
   SPACE_API_URL: http://127.0.0.1:8080
   SPACE_DATA_PLANE_URL: http://127.0.0.1:8090
   # On Kind, SPACE serves its E2B-compatible API (which serves forks) on the main API port
@@ -52,10 +56,10 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check out SPACE
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: perplexityai/SPACE
           ref: ${{ inputs.space_ref }}
@@ -104,12 +108,60 @@ jobs:
           echo "$HOME/.local/bin" >>"$GITHUB_PATH"
           INSTALL_DIR="$HOME/.local/bin" bash infra/space/kind/scripts/install-prereqs.sh
 
+      # Anonymous public.ecr.aws pulls from GitHub runners hit "429 Too Many Requests: Data limit
+      # exceeded". SPACE's own helper pulls each listed image from its GHCR mirror, else the same
+      # digest from Docker Hub, and tags it with the name the Dockerfiles use, so builds find it
+      # locally. See SPACE's ci/mirrored-images.txt.
+      - name: Pre-pull SPACE's public.ecr.aws base images
+        working-directory: SPACE
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t images < <(awk '!/^#/ && $1 ~ /^public\.ecr\.aws\// {print $1}' ci/mirrored-images.txt)
+          bash ci/scripts/mirror-images.sh pull "${images[@]}"
+          # Images with no Docker Hub twin in the list: take Docker Hub's official image of the
+          # same name and tag (public.ecr.aws/ubuntu/ubuntu is Canonical's; so is Docker Hub's ubuntu).
+          missing=0
+          for image in "${images[@]}"; do
+            image="${image%%@*}"  # the helper tags names pinned by digest without the digest
+            docker image inspect "$image" >/dev/null 2>&1 && continue
+            case "$image" in
+              public.ecr.aws/ubuntu/ubuntu:*) fallback="docker.io/library/ubuntu:${image##*:}" ;;
+              *) echo "::warning::No fallback for $image"; missing=1; continue ;;
+            esac
+            docker pull --quiet "$fallback" && docker tag "$fallback" "$image" \
+              && echo "Took $image from $fallback" || missing=1
+          done
+          docker image ls --format '{{.Repository}}:{{.Tag}}' | grep '^public\.ecr\.aws/' || true
+          [[ "$missing" == 0 ]] || echo "::warning::Some public.ecr.aws images are not local; the build pulls them itself"
+
       - name: Build and deploy SPACE
         working-directory: SPACE
         run: |
           export SPACE_VENDOR_ROOT="$HOME/.local/share/space/vendor"
+          # Pods pull their images inside the Kind nodes, which cannot see the images pulled above.
+          # bootstrap.sh creates the cluster long before it installs the charts, so copy each local
+          # public.ecr.aws image a chart names into the nodes as soon as they exist (the charts use
+          # pullPolicy IfNotPresent, so no pod then asks public.ecr.aws for it).
+          (
+            for _ in $(seq 1 360); do
+              if [[ -n "$(kind get nodes --name "$SPACE_KIND_CLUSTER" 2>/dev/null)" ]]; then
+                sleep 30
+                docker image ls --format '{{.Repository}}:{{.Tag}}' | grep '^public\.ecr\.aws/' |
+                  while read -r image; do
+                    grep -rqF "${image%:*}" infra/space/kind/charts || continue
+                    kind load docker-image "$image" --name "$SPACE_KIND_CLUSTER" \
+                      && echo "[preload] loaded $image into the Kind nodes"
+                  done
+                exit 0
+              fi
+              sleep 10
+            done
+          ) &
+          preload=$!
           time bash infra/space/kind/scripts/install-fc-vendor.sh
           time bash infra/space/kind/scripts/bootstrap.sh
+          kill "$preload" 2>/dev/null || true
 
       - name: Wait for the seed template and node services
         working-directory: SPACE
@@ -146,7 +198,7 @@ jobs:
           echo "E2B-compatible GET /sandboxes -> HTTP $code"
           [[ "$code" == 200 ]] || { echo "::error::The fork API did not accept the key"; exit 1; }
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.11"
 
@@ -206,7 +258,7 @@ jobs:
 
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: integration-results
           path: |
