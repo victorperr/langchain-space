@@ -67,7 +67,9 @@ jobs:
           persist-credentials: false
 
       - name: Record the machine
+        id: machine
         run: |
+          echo "space_sha=$(git -C SPACE rev-parse HEAD)" >>"$GITHUB_OUTPUT"
           {
             echo "## Machine"
             echo
@@ -135,7 +137,31 @@ jobs:
           docker image ls --format '{{.Repository}}:{{.Tag}}' | grep '^public\.ecr\.aws/' || true
           [[ "$missing" == 0 ]] || echo "::warning::Some public.ecr.aws images are not local; the build pulls them itself"
 
+      # Compiling SPACE's Rust workspace is about 30 of the ~50 minutes bootstrap takes. Its output
+      # is one image, keyed here by SPACE commit; SPACE's own CI hands it between jobs the same way
+      # (SPACE_KIND_RUST_ARTIFACTS=prebuilt in infra/space/kind/scripts/build-rust-artifacts.sh).
+      - name: Restore the compiled SPACE Rust image
+        id: rust-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/space-rust-image.tar.zst
+          key: space-rust-artifacts-${{ steps.machine.outputs.space_sha }}
+
+      - name: Use the cached Rust image
+        if: steps.rust-cache.outputs.cache-hit == 'true'
+        env:
+          SPACE_SHA: ${{ steps.machine.outputs.space_sha }}
+        run: |
+          zstd -dcq "$RUNNER_TEMP/space-rust-image.tar.zst" | docker load
+          rm -f "$RUNNER_TEMP/space-rust-image.tar.zst"
+          {
+            echo "SPACE_KIND_RUST_ARTIFACTS=prebuilt"
+            echo "SPACE_KIND_PREBUILT_RUST_IMAGE_ID=$(docker image inspect -f '{{.Id}}' space-rust-build-kind:local)"
+            echo "SPACE_KIND_PREBUILT_RUST_SHA=$SPACE_SHA"
+          } >>"$GITHUB_ENV"
+
       - name: Build and deploy SPACE
+        id: deploy
         working-directory: SPACE
         run: |
           export SPACE_VENDOR_ROOT="$HOME/.local/share/space/vendor"
@@ -163,6 +189,28 @@ jobs:
           time bash infra/space/kind/scripts/bootstrap.sh
           kill "$preload" 2>/dev/null || true
 
+      # Saved even when a later part of bootstrap fails, as long as the compile finished.
+      - name: Export the compiled SPACE Rust image
+        id: rust-export
+        if: ${{ !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: |
+          if docker image inspect space-rust-build-kind:local >/dev/null 2>&1; then
+            docker save space-rust-build-kind:local | zstd -T0 -3 -q -o "$RUNNER_TEMP/space-rust-image.tar.zst"
+            ls -lh "$RUNNER_TEMP/space-rust-image.tar.zst"
+            echo "ready=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "::warning::No compiled Rust image to cache"
+          fi
+
+      - name: Save the compiled SPACE Rust image for later runs
+        if: ${{ !cancelled() && steps.rust-export.outputs.ready == 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/space-rust-image.tar.zst
+          key: space-rust-artifacts-${{ steps.machine.outputs.space_sha }}
+
       - name: Wait for the seed template and node services
         working-directory: SPACE
         run: |
@@ -180,7 +228,12 @@ jobs:
           echo "::error::The data plane never became healthy"
           exit 1
 
+      # The next two steps may fail without skipping the tests: fork tests skip themselves without
+      # SPACE_ECW_API_KEY, and the template falls back to seed. "Fail if a setup step failed" below
+      # still marks the run failed, after the tests have run.
       - name: Create an API key for the fork API
+        id: ecw
+        continue-on-error: true
         working-directory: SPACE
         run: |
           key="lcs_ci_$(openssl rand -hex 32)"
@@ -188,28 +241,47 @@ jobs:
           key_file="$RUNNER_TEMP/ecw-key"
           (umask 077 && printf '%s' "$key" >"$key_file")
           # Same organization as root@local, so forked sandboxes are visible to the native API.
-          bash scripts/seed-api-key.sh \
+          # seed-api-key.sh only prints the SQL here: its --execute helper pod asks for a
+          # `general` node pool that Kind does not have. Run the SQL inside the Postgres pod
+          # instead, as SPACE's Kind suites do (kind_stack_psql, scripts/tests/lib/bootstrap-kind-stack.sh).
+          sql="$(bash scripts/seed-api-key.sh \
             --org-id "$SPACE_LOCAL_ORG_ID" --created-by "$SPACE_ROOT_USER_ID" \
             --name langchain-space-ci --token-file "$key_file" \
-            --execute --context kind-space-local --namespace space
-          echo "SPACE_ECW_API_KEY=$key" >>"$GITHUB_ENV"
+            | sed -n '/^INSERT INTO api_keys/,/^);/p')"
+          [[ -n "$sql" ]] || { echo "::error::seed-api-key.sh printed no INSERT"; exit 1; }
+          kctl() { kubectl --context "kind-$SPACE_KIND_CLUSTER" -n space "$@"; }
+          read -r pg_user pg_db < <(kctl get secret space-postgres -o \
+            go-template='{{index .data "POSTGRES_USER" | base64decode}} {{index .data "POSTGRES_DB" | base64decode}}')
+          printf '%s\n' "$sql" | kctl exec -i sts/space-postgres -- \
+            env PGHOST=127.0.0.1 PGSSLMODE=require \
+            psql -U "$pg_user" -d "$pg_db" -tA -v ON_ERROR_STOP=1
           code="$(printf 'header = "x-api-key: %s"\n' "$key" \
             | curl -s -o /dev/null -w '%{http_code}' --config - "$SPACE_ECW_API_URL/sandboxes")"
           echo "E2B-compatible GET /sandboxes -> HTTP $code"
           [[ "$code" == 200 ]] || { echo "::error::The fork API did not accept the key"; exit 1; }
+          # Only a key the fork API accepted reaches the tests.
+          echo "SPACE_ECW_API_KEY=$key" >>"$GITHUB_ENV"
 
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.11"
 
       - name: Build the code-runtime template
-        if: inputs.template == 'code-runtime'
+        id: template
+        if: inputs.template == 'code-runtime' && steps.ecw.outcome == 'success'
+        continue-on-error: true
         working-directory: SPACE
         timeout-minutes: 120
         run: |
           export E2B_API_KEY="$SPACE_ECW_API_KEY"
           uv run --script scripts/build-code-runtime.py \
             --domain local.e2b.test --api-url "$SPACE_ECW_API_URL" --skip-sandbox-check
+
+      - name: Fall back to the seed template
+        if: inputs.template == 'code-runtime' && steps.template.outcome != 'success'
+        run: |
+          echo "::warning::code-runtime was not built; testing with seed, which may lack python"
+          echo "SPACE_TEMPLATE=seed" >>"$GITHUB_ENV"
 
       - name: Install langchain-space
         run: uv sync --locked
@@ -240,6 +312,12 @@ jobs:
           uv run python benchmarks/run.py --space --template "$SPACE_TEMPLATE" \
             --runs "$BENCHMARK_RUNS" | tee benchmark-table.md
           { echo "## Benchmarks"; echo; cat benchmark-table.md; } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if a setup step failed
+        if: ${{ !cancelled() && (steps.ecw.outcome == 'failure' || steps.template.outcome == 'failure') }}
+        run: |
+          echo "::error::Setup did not fully succeed (fork API key: ${{ steps.ecw.outcome }}, code-runtime: ${{ steps.template.outcome }})"
+          exit 1
 
       - name: Collect SPACE diagnostics
         if: failure()
