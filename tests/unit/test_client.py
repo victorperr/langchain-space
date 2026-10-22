@@ -321,16 +321,24 @@ class TestPolling:
         assert sleeps == [0.05, 0.1, 0.2, 0.4, 0.5, 0.5]
 
 
+# The native API names sandboxes `sbx_<uuid>` (PublicSandboxId); the E2B-compatible API takes and
+# returns the bare UUID (SandboxId). Found on real SPACE: `/sandboxes/sbx_.../fork` is a 404.
+SRC_UUID = "019d84bd-280d-7331-99c6-b63377f3a3a2"
+CHILD_UUID = "019d84bd-9999-7331-99c6-b63377f3a3a2"
+SRC = f"sbx_{SRC_UUID}"
+CHILD = f"sbx_{CHILD_UUID}"
+
+
 class TestFork:
     def test_fork_uses_ecw_route_and_waits_for_child(
         self, client: HttpSpaceClient, mock: respx.MockRouter
     ) -> None:
-        fork = mock.post(f"{ECW}/sandboxes/sbx_1/fork").respond(
-            201, json=[{"sandboxID": "sbx_child", "templateID": "t", "clientID": "c"}]
+        fork = mock.post(f"{ECW}/sandboxes/{SRC_UUID}/fork").respond(
+            201, json=[{"sandboxID": CHILD_UUID, "templateID": "t", "clientID": "c"}]
         )
-        mock_running(mock, "sbx_child")
+        mock_running(mock, CHILD)
 
-        assert client.fork("sbx_1", lifetime_seconds=600) == "sbx_child"
+        assert client.fork(SRC, lifetime_seconds=600) == CHILD
 
         request = fork.calls.last.request
         assert request.headers["X-API-Key"] == "ecw-key"
@@ -338,14 +346,21 @@ class TestFork:
         assert request.headers["Idempotency-Key"]
         assert json.loads(request.content) == {"timeout": 600, "count": 1}
 
+    def test_fork_accepts_an_already_prefixed_child_id(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        mock.post(f"{ECW}/sandboxes/{SRC_UUID}/fork").respond(201, json=[{"sandboxID": CHILD}])
+        mock_running(mock, CHILD)
+        assert client.fork(SRC) == CHILD
+
     def test_fork_target_error_raises(
         self, client: HttpSpaceClient, mock: respx.MockRouter
     ) -> None:
-        mock.post(f"{ECW}/sandboxes/sbx_1/fork").respond(
+        mock.post(f"{ECW}/sandboxes/{SRC_UUID}/fork").respond(
             201, json=[{"error": {"code": 503, "message": "capture failed"}}]
         )
         with pytest.raises(SpaceError, match="capture failed"):
-            client.fork("sbx_1")
+            client.fork(SRC)
 
     @pytest.mark.parametrize(
         "body",
@@ -359,9 +374,9 @@ class TestFork:
     def test_malformed_fork_response_is_a_space_error(
         self, client: HttpSpaceClient, mock: respx.MockRouter, body: Any
     ) -> None:
-        mock.post(f"{ECW}/sandboxes/sbx_1/fork").respond(201, json=body)
+        mock.post(f"{ECW}/sandboxes/{SRC_UUID}/fork").respond(201, json=body)
         with pytest.raises(SpaceError):
-            client.fork("sbx_1")
+            client.fork(SRC)
 
     def test_fork_requires_ecw_configuration(self) -> None:
         with HttpSpaceClient(API, DATA_PLANE, "tok") as plain, pytest.raises(SpaceError) as info:

@@ -352,7 +352,7 @@ class HttpSpaceClient:
         lifetime = lifetime_seconds or self.default_fork_lifetime
         response = self._request(
             "POST",
-            f"{self._ecw_api_url}/sandboxes/{_q(sandbox_id)}/fork",
+            f"{self._ecw_api_url}/sandboxes/{_q(_ecw_sandbox_id(sandbox_id))}/fork",
             body={"timeout": lifetime, "count": 1},
             mutation=True,
             expect=(201,),
@@ -375,7 +375,7 @@ class HttpSpaceClient:
                 str(message or "fork failed"),
                 code=str(code) if code is not None else "fork_failed",
             )
-        child_id = _str(result, "sandboxID")
+        child_id = _native_sandbox_id(_str(result, "sandboxID"))
         self._wait_running(child_id)
         return child_id
 
@@ -745,6 +745,21 @@ def _str(payload: Mapping[str, Any], key: str) -> str:
 
 def _q(segment: str) -> str:
     return quote(segment, safe="")
+
+
+# The native API names a sandbox `sbx_<uuid>` (`PublicSandboxId`, which rejects a bare UUID); the
+# E2B-compatible API takes and returns the bare UUID (`SandboxId`, which rejects the prefix and
+# answers "Sandbox not found"). Same UUID either way. SPACE: crates/libs/public/api/src/lib.rs,
+# crates/libs/common/core/src/types/sandbox.rs, crates/libs/api/src/routes/e2b/translate.rs.
+_SANDBOX_PREFIX = "sbx_"
+
+
+def _ecw_sandbox_id(sandbox_id: str) -> str:
+    return sandbox_id.removeprefix(_SANDBOX_PREFIX)
+
+
+def _native_sandbox_id(sandbox_id: str) -> str:
+    return sandbox_id if sandbox_id.startswith(_SANDBOX_PREFIX) else _SANDBOX_PREFIX + sandbox_id
 
 
 def _origin(url: str) -> tuple[str, str]:

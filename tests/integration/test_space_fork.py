@@ -40,7 +40,9 @@ def test_parallel_branches_are_isolated_and_winner_is_kept(source: SpaceSandbox)
         test_command=f'test "$(cat {FIX})" = good',
     )
     try:
-        assert [b.passed for b in result.branches] == [False, True, False]
+        # Branch failures are recorded, not raised: show them, or a fork error reads as "all False".
+        details = [(b.index, b.exit_code, b.error) for b in result.branches]
+        assert [b.passed for b in result.branches] == [False, True, False], details
         assert result.sandbox is not None
         assert result.sandbox.download_files([FIX])[0].content == b"good"
         assert source.download_files([FIX])[0].content == b"original"

@@ -145,11 +145,14 @@ There is no SPACE Python SDK; we call the HTTP API with `httpx` + `httpx-sse`.
   Example: `SPACE/space_smoke/scenarios/native_aws_secret_network_credential_injection.py`.
 
 ### Open questions (resolve on a real SPACE host, then move into the notes above)
-- E2B fork route on Kind: from source, the Kind chart lists `127.0.0.1` as an ECW `apiHost`
-  (`infra/space/kind/charts/space-api-local/values.yaml`, port stripped by `routes/e2b/hosts.rs`), so
-  `SPACE_ECW_API_URL=http://127.0.0.1:8080` should work; auth is `X-API-Key`, seeded with
-  `scripts/seed-api-key.sh --org-id <org> --created-by <user> --execute` (key must be in the same org as
-  the native token). Confirm with a run of the integration workflow.
+- E2B fork route on Kind: verified (run 39739394245). `127.0.0.1` is an ECW `apiHost` in the Kind
+  chart, so `SPACE_ECW_API_URL=http://127.0.0.1:8080` with `X-API-Key` reaches it (`GET /sandboxes`
+  200). Seed the key with the SQL `scripts/seed-api-key.sh` prints, run via `kubectl exec
+  sts/space-postgres -- psql` (its `--execute` pod wants a `general` node pool Kind lacks), in the
+  native token's org. **IDs differ**: native = `sbx_<uuid>`, ECW = bare `<uuid>` in and out (else 404
+  "Sandbox not found"); `HttpSpaceClient.fork` converts. Still unverified: the fork itself.
+- API keys may not publish templates named `seed` or `code-runtime` (reserved for the operator); the
+  workflow builds the recipe as `lcs-code-runtime`.
 - Fork latency from a suspended anchor; does the child come up `running` or need `:wake`?
   (`HttpSpaceClient.fork` currently waits for `running`.)
 - The fork `timeout` is the child's lifetime (u32 seconds, default 300; only `> 0` is validated). Does it

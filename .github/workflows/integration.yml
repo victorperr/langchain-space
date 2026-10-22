@@ -44,6 +44,10 @@ env:
   # for Host 127.0.0.1: see ecwHosts in SPACE's infra/space/kind/charts/space-api-local/values.yaml.
   SPACE_ECW_API_URL: http://127.0.0.1:8080
   SPACE_TEMPLATE: ${{ inputs.template }}
+  # API keys may not publish `seed` or `code-runtime` ("template name is reserved for operator
+  # publication": ReservedTemplateNames in SPACE's internal/api/server/src/template_publication.rs),
+  # so the code-runtime recipe is built under this name, in our org.
+  CODE_RUNTIME_ALIAS: lcs-code-runtime
   # Seeded by SPACE's baseline migration (db/postgres/*_baseline.up.sql): the Local org and root@local.
   SPACE_LOCAL_ORG_ID: 00000000-0000-0000-0000-000000000001
   SPACE_ROOT_USER_ID: 00000000-0000-0000-0000-000000000010
@@ -280,8 +284,9 @@ jobs:
         timeout-minutes: 120
         run: |
           export E2B_API_KEY="$SPACE_ECW_API_KEY"
-          uv run --script scripts/build-code-runtime.py \
+          uv run --script scripts/build-code-runtime.py --alias "$CODE_RUNTIME_ALIAS" \
             --domain local.e2b.test --api-url "$SPACE_ECW_API_URL" --skip-sandbox-check
+          echo "SPACE_TEMPLATE=$CODE_RUNTIME_ALIAS" >>"$GITHUB_ENV"
 
       - name: Fall back to the seed template
         if: inputs.template == 'code-runtime' && steps.template.outcome != 'success'
