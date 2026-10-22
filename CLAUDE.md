@@ -150,7 +150,8 @@ There is no SPACE Python SDK; we call the HTTP API with `httpx` + `httpx-sse`.
   200). Seed the key with the SQL `scripts/seed-api-key.sh` prints, run via `kubectl exec
   sts/space-postgres -- psql` (its `--execute` pod wants a `general` node pool Kind lacks), in the
   native token's org. **IDs differ**: native = `sbx_<uuid>`, ECW = bare `<uuid>` in and out (else 404
-  "Sandbox not found"); `HttpSpaceClient.fork` converts. Still unverified: the fork itself.
+  "Sandbox not found"); `HttpSpaceClient.fork` converts. Forks verified (run 39745156201): fork,
+  anchor, restore and fork-and-select all work; forks come up usable through `HttpSpaceClient.fork`.
 - API keys may not publish templates named `seed` or `code-runtime` (reserved for the operator); the
   workflow builds the recipe as `lcs-code-runtime`.
 - Fork latency from a suspended anchor; does the child come up `running` or need `:wake`?
@@ -188,12 +189,11 @@ standard suite wiring → M3 consistency tests, failing first → M4 snapshots +
 M5 fork-and-select + demo → M6 Linux SPACE host + integration → M7 benchmarks → M8 credentials on real
 AWS + exfiltration demo → M9 README.
 
-Status: everything that runs on the fake/mocked HTTP is done: M0–M5, M7 (harness; simulated numbers),
-M8 (wiring, mocked HTTP tests, simulated exfiltration demo) and M9 (README). Remaining work needs real
-infrastructure:
-- M6: bring up SPACE on Linux/KVM, build `code-runtime`, run `uv run pytest -m integration`, resolve the
-  open questions above.
-- M7: `uv run python benchmarks/run.py --space` and replace the simulated table in README.md.
+Status: M0–M5 and M9 done. M6 and M7 run on real SPACE through the integration workflow (Kind on a
+GitHub-hosted runner): forks, consistency tests and benchmarks pass, README has the real table (run
+39745156201). Left:
+- M6: confirm the 2 large-`execute` standard tests pass after the 10 MiB output cap change; resolve
+  the remaining open questions above.
 - M8: Secrets Manager + Private CA + an echo endpoint, then `tests/integration/test_space_credentials.py`.
 - README: record the demo GIF (placeholder comment in README.md).
 

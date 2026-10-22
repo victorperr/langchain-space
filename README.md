@@ -153,27 +153,38 @@ The credential demo simulates SPACE's gateway. The real path is covered by
 
 | Operation | Runs | Median (ms) | p90 (ms) |
 |---|---:|---:|---:|
-| fork live sandbox | 20 | 0.05 | 0.06 |
-| anchor | 20 | 0.05 | 0.06 |
-| restore | 20 | 0.05 | 0.08 |
-| branch run from old checkpoint (restore + 1 step) | 10 | 3.12 | 5.04 |
+| fork live sandbox | 10 | 12,799 | 12,819 |
+| anchor | 10 | 19,122 | 19,150 |
+| restore | 10 | 7,787 | 7,797 |
+| branch run from old checkpoint (restore + 1 step) | 10 | 27,002 | 27,166 |
 
 | Restore check | Branches | Correct |
 |---|---:|---:|
 | anchor restore after N divergent branches | 10 | 10/10 |
 | LangGraph branches from one checkpoint | 10 | 10/10 |
 
-These numbers are from **simulated sandboxes**, run on Windows 11 with 8 CPUs and
-Python 3.11. They measure this library's overhead and check correctness. They are not SPACE
-latencies; SPACE numbers will replace them once measured on a Linux/KVM host. The correctness
-check has a negative control: with a fake whose forks share state, it reports 0/N.
+Measured on **real SPACE** (commit `b6ca1b2`, `lcs-code-runtime` template built from SPACE's
+`code-runtime` recipe), installed in Kind on a free GitHub-hosted runner: AMD EPYC 7763, 4 vCPUs,
+15 GiB RAM, Ubuntu 24.04, Python 3.11, on 2026-10-22. That is one small VM running the whole
+SPACE control plane and the Firecracker microVMs under nested virtualization, so treat the
+latencies as an upper bound, not as production numbers. A SPACE fork is disk-only and the child
+cold-boots, which is most of each figure. The workflow is
+[`.github/workflows/integration.yml`](.github/workflows/integration.yml); its run uploads the JSON.
+
+Without `--space` the same script runs against simulated sandboxes and measures only this
+library's overhead (about 0.05 ms per operation). The correctness check has a negative control:
+with a fake whose forks share state, it reports 0/N.
 
 ## Status
 
-Everything is verified against an in-memory fake of SPACE and against mocked HTTP shaped from
-the SPACE source; it has not yet run against a live SPACE deployment. SPACE needs Linux x86_64
-with KVM. The open questions to settle on a real host (fork lifetime of suspended anchors,
-whether forks come up running, network-policy inheritance) are listed in `CLAUDE.md`.
+Runs on a live SPACE deployment (the integration workflow above, run 39745156201):
+fork-and-select, the time-travel consistency tests and the benchmarks pass there. Of the
+standard `langchain-tests` sandbox suite's 86 tests, 77 pass; 7 check the pre-0.7 deepagents
+`glob`/`write` contract and are marked as expected failures (see
+`tests/integration/test_standard.py`); the 2 large `execute` output tests failed on our old
+200,000-character output cap, which now matches deepagents' 10 MiB capture limit.
+Credential injection is not verified on real infrastructure: it needs AWS Secrets Manager and
+AWS Private CA. Remaining open questions are listed in `CLAUDE.md`.
 
 ## Development
 

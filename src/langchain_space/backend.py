@@ -29,7 +29,10 @@ from deepagents.backends.sandbox import BaseSandbox
 
 from langchain_space.client import SpaceClient, SpaceError
 
-DEFAULT_MAX_OUTPUT_CHARS = 200_000
+# Matches deepagents' own execute capture cap (`_EXECUTE_CAPTURE_MAX_BYTES`, 10 MiB); its
+# filesystem middleware already offloads large results to a file, so a stricter default here
+# would only cut output deepagents expects to see.
+DEFAULT_MAX_OUTPUT_CHARS = 10 * 1024 * 1024
 
 ContentCheck = Callable[[bytes, str], None]
 """`(content, where) -> None`; raises to block content from being sent into the sandbox."""

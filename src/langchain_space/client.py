@@ -220,7 +220,7 @@ class HttpSpaceClient:
         poll_interval: float = 0.5,
         request_timeout: float = 60,
         chunk_size: int = 4 * MIB,
-        max_output_bytes: int = 8 * MIB,
+        max_output_bytes: int = 10 * MIB,
         http: httpx.Client | None = None,
     ) -> None:
         self._api_url = api_url.rstrip("/")

@@ -45,6 +45,15 @@ class TestExecute:
         assert result.truncated
         assert result.output.startswith("0123456789")
 
+    def test_default_limit_keeps_what_deepagents_captures(self) -> None:
+        # deepagents captures up to 10 MiB of execute output and offloads large results to a
+        # file itself; a stricter default here failed langchain-tests' 500 KiB stdout test.
+        big = "x" * (500 * 1024)
+        fake = FakeSpaceClient(lambda sandbox, argv: (big, 0))
+        result = SpaceSandbox.create(fake, "t").execute("print big")
+        assert result.truncated is False
+        assert result.output == big
+
     def test_read_is_not_cut_by_the_output_limit(self) -> None:
         # BaseSandbox.read returns its file as one JSON line, bounded by deepagents itself
         # (500 KiB). Cutting it at max_output_chars broke every read of a file larger than
