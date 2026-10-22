@@ -28,7 +28,7 @@ sandbox state move together.
 ![Rewind demo on real SPACE: with a plain backend the rewound step reads v3, with langchain-space it reads v1](docs/rewind-demo.gif)
 
 *Recorded on real SPACE microVMs by the [integration workflow](.github/workflows/integration.yml)
-(run 39767164692); long waits are shortened in the GIF, the printed timings are real. Source:
+(run 39812049901); long waits are shortened in the GIF, the printed timings are real. Source:
 [`examples/rewind_demo.py`](examples/rewind_demo.py).*
 
 ## What it does
