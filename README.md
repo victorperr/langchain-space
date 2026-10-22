@@ -2,17 +2,17 @@
 
 <!-- PROJECT SHIELDS -->
 
-![Python](https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white)
-
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
   <a href="https://github.com/victorperr/langchain-space">
-    <img src="docs/logo.png" alt="Logo" width="400" height="250">
+    <img src="docs/logo.png" alt="Logo" width="450" height="250">
   </a>
 </div>
 
 A [LangChain Deep Agents](https://github.com/langchain-ai/deepagents) sandbox backend for [SPACE](https://github.com/perplexityai/SPACE), Perplexity's open-source Firecracker microVM platform, where **rewinding or forking a LangGraph thread also rewinds or forks the sandbox**.
+
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 
 
 ## Problem
