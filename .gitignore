@@ -19,6 +19,7 @@ htmlcov/
 # Local env / secrets
 .env
 .env.*
+!.env.example
 
 # Benchmark outputs
 benchmarks/results/

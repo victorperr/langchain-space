@@ -92,6 +92,66 @@ saved.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
+## Installation
+
+### Prerequisites
+
+- **Python 3.11 or newer** (CI tests 3.11, 3.12 and 3.13 on Linux and Windows).
+- **Nothing else for simulated sandboxes.** The demos, unit tests and consistency tests run
+  on an in-memory fake of SPACE, on Windows, macOS or Linux.
+- **For real sandboxes, a SPACE deployment** with:
+  - the native API and data plane reachable from your machine, and a session token;
+  - its E2B-compatible API and an API key for it. Forks go through it, so `SpaceCheckpointer`
+    and `fork_and_select` need it; a plain `SpaceSandbox` does not;
+  - a template with `python3` and a POSIX shell (Deep Agents' file tools run small `python3`
+    scripts). SPACE's `code-runtime` recipe works. On a deployment where you are not the
+    operator, build it under your own name: `seed` and `code-runtime` are reserved.
+
+  SPACE itself needs Linux x86_64 with KVM, btrfs and privileged Docker
+  ([SPACE install guide](https://github.com/perplexityai/SPACE/blob/main/docs/installation.md)).
+  No Linux machine? [`.github/workflows/integration.yml`](.github/workflows/integration.yml)
+  installs SPACE on a free GitHub-hosted runner and runs everything against it.
+- **For credential injection only:** SPACE deployed on AWS, with AWS Secrets Manager and AWS
+  Private CA. See [`docs/credential-injection.md`](docs/credential-injection.md).
+
+### Install
+
+```bash
+pip install git+https://github.com/victorperr/langchain-space
+```
+
+Or from a clone, to run the demos and tests ([uv](https://docs.astral.sh/uv/)):
+
+```bash
+git clone https://github.com/victorperr/langchain-space && cd langchain-space
+uv sync
+uv run python examples/rewind_demo.py        # simulated sandboxes: checks the install
+```
+
+### Configure
+
+`HttpSpaceClient.from_env()` reads its settings from environment variables. Copy
+[`.env.example`](.env.example) to `.env`, fill it in, and load it into your shell
+(`set -a; source .env; set +a`; the file shows the PowerShell equivalent).
+
+| Variable | Needed for | Local Kind install |
+|---|---|---|
+| `SPACE_API_URL` | everything | `http://127.0.0.1:8080` |
+| `SPACE_DATA_PLANE_URL` | everything (command output streams from it) | `http://127.0.0.1:8090` |
+| `SPACE_API_TOKEN` | everything | `POST /auth/v1/sessions` (command in `.env.example`) |
+| `SPACE_ECW_API_URL` | forks: rewind, branches, `fork_and_select` | `http://127.0.0.1:8080` |
+| `SPACE_ECW_API_KEY` | forks | see below |
+
+**The E2B-compatible API key** must belong to the same SPACE organization as your token,
+otherwise forks are invisible to the native API. SPACE's `scripts/seed-api-key.sh --org-id
+<org> --created-by <user> --name <name>` prints the SQL that creates it; a SPACE operator runs
+that SQL against SPACE's database. The integration workflow's step "Create an API key for the
+fork API" does exactly this on a Kind install (the script's own `--execute` mode needs a node
+pool Kind lacks).
+
+Then run `uv run python examples/rewind_demo.py --space --template <your template>` to see
+the rewind on real microVMs.
+
 ## Quickstart
 
 ```python
