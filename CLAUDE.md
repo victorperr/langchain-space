@@ -64,7 +64,8 @@ tests/
   consistency/     # rewind/fork correctness tests (the core claim)
   integration/     # real SPACE, @pytest.mark.integration; test_standard.py = langchain-tests suite
 benchmarks/        # fork latency, anchor latency, restore correctness after N branches
-examples/          # rewind_demo.py (README GIF), buggy_repo/ + fork_and_select_demo.py
+examples/          # rewind_demo.py (README GIF), buggy_repo/ + fork_and_select_demo.py,
+                   # check_credential_injection.py (end-to-end check for docs/credential-injection.md)
 SPACE/             # vendored SPACE source (own .git); excluded from git, ruff, mypy
 ```
 
@@ -143,6 +144,15 @@ There is no SPACE Python SDK; we call the HTTP API with `httpx` + `httpx-sse`.
   Private CA; not configured in a stock local install. Egress: `egress{default_action, allow[], deny[]}`
   with `{ip|cidr|domain|wildcard_domain}` entries; domain rules need DNS via 8.8.8.8/1.1.1.1 allowed.
   Example: `SPACE/space_smoke/scenarios/native_aws_secret_network_credential_injection.py`.
+  Retire: `DELETE /v1/credential-references/{id}` -> 204 (`credentials.retire`). **Registering only
+  stores the ARN** (format check, no AWS call), so a broken AWS setup shows up only as requests leaving
+  without the header. Operator setup, all off by default: authority `SPACE_CREDMGR_INTERMEDIATE_CA_ARN`
+  (EC root, SPACE signs `SHA256WITHECDSA`) and `SPACE_CREDMGR_SECRETS_MANAGER_ROLE_ARN` (reader role,
+  policies in `infra/space/aws/eks/modules/space/credmgr_secrets_reader.tf`), sandbox-manager
+  `SPACE_SBXMGR_NETWORK_CREDENTIALS_ENABLED=true`, and the CA root baked into seed at build time
+  (`/space/etc/space-mitm/root-ca.pem` in build-manager), so seed and derived templates must be
+  rebuilt. Kind cannot do it as shipped. User guide: `docs/credential-injection.md`; end-to-end check:
+  `examples/check_credential_injection.py`.
 
 ### Open questions (resolve on a real SPACE host, then move into the notes above)
 - E2B fork route on Kind: verified (run 39739394245). `127.0.0.1` is an ECW `apiHost` in the Kind
@@ -193,7 +203,8 @@ Status: M0–M5 and M9 done. M6 and M7 run on real SPACE through the integration
 GitHub-hosted runner): all green in run 39752644201 (82 passed, 7 xfailed), README has the real
 benchmark table (run 39745156201). Left:
 - M6: resolve the remaining open questions above.
-- M8: Secrets Manager + Private CA + an echo endpoint, then `tests/integration/test_space_credentials.py`.
+- M8: needs SPACE on AWS (Kind cannot inject). Follow `docs/credential-injection.md`, then run
+  `examples/check_credential_injection.py` and `tests/integration/test_space_credentials.py`.
 
 ## Testing philosophy
 - For every feature, write the failing test first. The consistency tests must show the bug with a plain

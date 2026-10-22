@@ -9,6 +9,7 @@ from langchain_space.credentials import (
     SecretLeakError,
     build_network_policy,
     register,
+    retire,
 )
 from langchain_space.fork import BranchResult, ForkResult, fork_and_select
 from langchain_space.snapshots import MissingSnapshotError, SnapshotBinding
@@ -31,4 +32,5 @@ __all__ = [
     "build_network_policy",
     "fork_and_select",
     "register",
+    "retire",
 ]

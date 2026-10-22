@@ -17,6 +17,7 @@ from langchain_space.credentials import (
     SecretLeakError,
     build_network_policy,
     register,
+    retire,
 )
 from langchain_space.testing import FakeSpaceClient
 from langchain_space.testing.graphs import thread
@@ -59,6 +60,13 @@ class TestPolicy:
         fake = FakeSpaceClient()
         credential = register(fake, CredentialRule("api.github.com", "authorization", ARN))
         assert fake.credential_references[credential.credential_reference_id] == ARN
+
+    def test_retire_removes_the_reference_and_is_idempotent(self) -> None:
+        fake = FakeSpaceClient()
+        credential = register(fake, CredentialRule("api.github.com", "authorization", ARN))
+        retire(fake, credential)
+        assert credential.credential_reference_id not in fake.credential_references
+        retire(fake, credential)  # already gone: not an error
 
     def test_policy_shape_matches_space(self) -> None:
         fake = FakeSpaceClient()

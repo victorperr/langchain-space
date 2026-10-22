@@ -127,6 +127,15 @@ def register(client: SpaceClient, rule: CredentialRule) -> RegisteredCredential:
     return RegisteredCredential(rule, client.register_credential_reference(rule.secret_arn))
 
 
+def retire(client: SpaceClient, credential: RegisteredCredential) -> None:
+    """Retire a registered credential's reference in SPACE (idempotent).
+
+    Detach it first: build the sandbox's policy without it and apply that, or delete the
+    sandbox. The secret itself stays in AWS Secrets Manager.
+    """
+    client.retire_credential_reference(credential.credential_reference_id)
+
+
 def build_network_policy(
     credentials: Sequence[RegisteredCredential] = (),
     *,

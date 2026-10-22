@@ -402,6 +402,23 @@ class TestCredentials:
         assert set(body) == {"provider", "secret_arn", "request_id"}
         assert route.calls.last.request.headers["Idempotency-Key"]
 
+    def test_retire_deletes_the_reference(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        # SPACE answers 204 (crates/libs/api/src/routes/public/credential_references.rs).
+        route = mock.delete(f"{API}/v1/credential-references/cref_1").respond(204)
+        client.retire_credential_reference("cref_1")
+        assert route.called
+        assert route.calls.last.request.headers["Idempotency-Key"]
+
+    def test_retiring_an_unknown_reference_is_not_an_error(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        mock.delete(f"{API}/v1/credential-references/cref_gone").respond(
+            404, json={"code": "not_found", "message": "credential reference not found"}
+        )
+        client.retire_credential_reference("cref_gone")
+
     def test_set_network_policy_patches_and_waits(
         self, client: HttpSpaceClient, mock: respx.MockRouter
     ) -> None:

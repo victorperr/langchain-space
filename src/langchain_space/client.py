@@ -169,6 +169,10 @@ class SpaceClient(Protocol):
         """Register an AWS Secrets Manager secret by reference; return its reference id."""
         ...
 
+    def retire_credential_reference(self, credential_reference_id: str) -> None:
+        """Retire a credential reference. Retiring an unknown one is not an error."""
+        ...
+
     def set_network_policy(self, sandbox_id: str, policy: Mapping[str, Any]) -> None:
         """Replace the sandbox's network policy and wait until it is applied."""
         ...
@@ -547,6 +551,19 @@ class HttpSpaceClient:
             expect=(201,),
         )
         return _str(response, "credential_reference_id")
+
+    def retire_credential_reference(self, credential_reference_id: str) -> None:
+        """See `SpaceClient.retire_credential_reference`."""
+        try:
+            self._request(
+                "DELETE",
+                f"{self._api_url}/v1/credential-references/{_q(credential_reference_id)}",
+                mutation=True,
+                expect=(204,),
+            )
+        except SpaceError as error:
+            if error.status != 404:
+                raise
 
     def set_network_policy(self, sandbox_id: str, policy: Mapping[str, Any]) -> None:
         """See `SpaceClient.set_network_policy`."""

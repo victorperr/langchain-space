@@ -269,6 +269,11 @@ class FakeSpaceClient:
         self.credential_references[reference_id] = secret_arn
         return reference_id
 
+    def retire_credential_reference(self, credential_reference_id: str) -> None:
+        """See `SpaceClient.retire_credential_reference`."""
+        self._record("retire_credential_reference", credential_reference_id=credential_reference_id)
+        self.credential_references.pop(credential_reference_id, None)
+
     def set_network_policy(self, sandbox_id: str, policy: Mapping[str, Any]) -> None:
         """See `SpaceClient.set_network_policy`."""
         self._record("set_network_policy", sandbox_id=sandbox_id, policy=dict(policy))

