@@ -328,8 +328,10 @@ jobs:
             --runs "$BENCHMARK_RUNS" | tee benchmark-table.md
           { echo "## Benchmarks"; echo; cat benchmark-table.md; } >>"$GITHUB_STEP_SUMMARY"
 
+      # The demo is a bonus: neither of its steps can fail the run.
       - name: Log in to SPACE for the demo
         if: ${{ !cancelled() && inputs.record_demo && steps.tests.outcome != 'skipped' }}
+        continue-on-error: true
         run: *login
 
       # The README GIF. Real SPACE steps take seconds each; agg caps every pause at 1 s, so the
