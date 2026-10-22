@@ -193,7 +193,6 @@ Status: M0–M5 and M9 done. M6 and M7 run on real SPACE through the integration
 GitHub-hosted runner): all green in run 39752644201 (82 passed, 7 xfailed), README has the real
 benchmark table (run 39745156201). Left:
 - M6: resolve the remaining open questions above.
-- README: put the workflow's `rewind-demo.gif` in `docs/` and uncomment the image line.
 - M8: Secrets Manager + Private CA + an echo endpoint, then `tests/integration/test_space_credentials.py`.
 
 ## Testing philosophy
