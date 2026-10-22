@@ -3,10 +3,12 @@
     uv run python examples/rewind_demo.py           # simulated sandboxes, runs anywhere
     uv run python examples/rewind_demo.py --space   # real SPACE (SPACE_* and SPACE_ECW_* env vars)
 
-A one-node graph writes v1, v2, then v3 to a file. We rewind to the checkpoint taken after v1
-and run one more step. With a plain sandbox backend that step still finds v3: the graph went
-back, the files did not. With langchain-space it finds v1, because every checkpoint is bound
-to a SPACE snapshot and rewinding forks a sandbox from it.
+The graph has one step, `edit` (`langchain_space.testing.graphs`): a LangGraph node, no LLM,
+that reads a file in the sandbox and overwrites it, through the same backend as Deep Agents'
+file tools. Steps 1-3 write v1, v2, v3. We rewind to the checkpoint saved after step 1 and run
+step 4. With a plain sandbox backend, step 4 reads v3: the graph went back, the file did not.
+With langchain-space it reads v1, because every checkpoint is bound to a SPACE snapshot and
+rewinding forks a sandbox from it.
 """
 
 from __future__ import annotations
@@ -35,24 +37,28 @@ GREEN, RED, BOLD, DIM, RESET = "\033[32m", "\033[31m", "\033[1m", "\033[2m", "\0
 THREAD = "demo"
 
 
-def rewind_and_step(graph: Any) -> tuple[str, float]:
-    """Write v1, v2, v3; rewind to after v1; run one step; return what it saw and its time."""
-    for target in ("v1", "v2", "v3"):
+def took(started: float) -> str:
+    return f"{DIM}({time.perf_counter() - started:.1f}s){RESET}"
+
+
+def rewind_and_step(graph: Any) -> str:
+    """Steps 1-3 write v1, v2, v3; rewind to after step 1; step 4 reports what it read."""
+    for number, target in enumerate(("v1", "v2", "v3"), start=1):
         started = time.perf_counter()
         graph.invoke({"target": target}, thread(THREAD))
-        print(f"  step writes {target}  {DIM}({time.perf_counter() - started:.1f}s){RESET}")
-    after_v1 = find_state(graph, THREAD, target="v1", finished=True)
-    print(f"  {BOLD}rewind to the checkpoint after v1{RESET}, run one more step")
+        print(f'  step {number} writes app.txt = "{target}"  {took(started)}')
+    after_step_1 = find_state(graph, THREAD, target="v1", finished=True)
+    print(f"  {BOLD}rewind to the checkpoint saved after step 1{RESET}")
     started = time.perf_counter()
-    seen = last_observed(graph.invoke({"target": "v4"}, after_v1.config))
-    return seen, time.perf_counter() - started
+    seen = last_observed(graph.invoke({"target": "v4"}, after_step_1.config))
+    print(f'  step 4 reads app.txt before writing: "{seen}"  {took(started)}')
+    return seen
 
 
-def verdict(seen: str, seconds: float) -> str:
-    took = f"{DIM}({seconds:.1f}s){RESET}"
+def verdict(seen: str) -> str:
     if seen == "v1":
-        return f'{GREEN}{BOLD}it sees "{seen}": OK, the sandbox rewound too{RESET}  {took}'
-    return f'{RED}{BOLD}it sees "{seen}": WRONG, the sandbox stayed in the future{RESET}  {took}'
+        return f"{GREEN}{BOLD}OK: the agent and its file are both back after step 1{RESET}"
+    return f"{RED}{BOLD}WRONG: the agent is back after step 1, its file is not{RESET}"
 
 
 @contextlib.contextmanager
@@ -87,7 +93,9 @@ def main() -> None:
     )
     where = "real SPACE microVMs" if args.space else "simulated sandboxes"
     print(f"{BOLD}Rewinding a LangGraph agent: does the sandbox rewind too?{RESET}")
-    print(f"{DIM}{where}; the graph edits {EDIT_FILE}{RESET}\n")
+    print(f"{DIM}{where}{RESET}")
+    print("The graph has one step, `edit` (a LangGraph node, no LLM). Each time it runs, it")
+    print(f"reads {EDIT_FILE} in the sandbox, then overwrites it with a new value.\n")
 
     for title, setup in (
         ("Plain sandbox backend + LangGraph checkpointer", plain_backend),
@@ -95,7 +103,7 @@ def main() -> None:
     ):
         print(f"{BOLD}{title}{RESET}")
         with setup(make_client(), args.template) as graph:
-            print(f"  {verdict(*rewind_and_step(graph))}\n")
+            print(f"  {verdict(rewind_and_step(graph))}\n")
 
 
 if __name__ == "__main__":

@@ -348,7 +348,7 @@ jobs:
           chmod +x "$RUNNER_TEMP/agg"
           export TERM=xterm-256color
           # `script` gives asciinema the terminal a CI step lacks.
-          script -q -e -c "asciinema rec --overwrite --cols 88 --rows 20 \
+          script -q -e -c "asciinema rec --overwrite --cols 88 --rows 24 \
             -c 'uv run python examples/rewind_demo.py --space --template $SPACE_TEMPLATE' \
             rewind-demo.cast" /dev/null
           "$RUNNER_TEMP/agg" --idle-time-limit 1 --font-size 18 rewind-demo.cast rewind-demo.gif

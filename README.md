@@ -183,20 +183,29 @@ All three run anywhere: they use simulated sandboxes (`FakeSpaceClient`) unless 
 
 ```text
 $ uv run python examples/rewind_demo.py
+The graph has one step, `edit` (a LangGraph node, no LLM). Each time it runs, it
+reads /home/user/work/app.txt in the sandbox, then overwrites it with a new value.
+
 Plain sandbox backend + LangGraph checkpointer
-  step writes v1
-  step writes v2
-  step writes v3
-  rewind to the checkpoint after v1, run one more step
-  it sees "v3": WRONG, the sandbox stayed in the future
+  step 1 writes app.txt = "v1"
+  step 2 writes app.txt = "v2"
+  step 3 writes app.txt = "v3"
+  rewind to the checkpoint saved after step 1
+  step 4 reads app.txt before writing: "v3"
+  WRONG: the agent is back after step 1, its file is not
 
 langchain-space: each checkpoint bound to a SPACE snapshot
-  step writes v1
-  step writes v2
-  step writes v3
-  rewind to the checkpoint after v1, run one more step
-  it sees "v1": OK, the sandbox rewound too
+  step 1 writes app.txt = "v1"
+  step 2 writes app.txt = "v2"
+  step 3 writes app.txt = "v3"
+  rewind to the checkpoint saved after step 1
+  step 4 reads app.txt before writing: "v1"
+  OK: the agent and its file are both back after step 1
 ```
+
+`edit` stands in for an agent's file tools: it goes through the same `SpaceSandbox` backend
+that Deep Agents' `read_file` and `write_file` use, without an LLM, so the demo is
+deterministic and free to run.
 
 ```text
 $ uv run python examples/fork_and_select_demo.py
