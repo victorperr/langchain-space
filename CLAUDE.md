@@ -64,7 +64,7 @@ tests/
   consistency/     # rewind/fork correctness tests (the core claim)
   integration/     # real SPACE, @pytest.mark.integration; test_standard.py = langchain-tests suite
 benchmarks/        # fork latency, anchor latency, restore correctness after N branches
-examples/          # buggy_repo/ + fork_and_select_demo.py
+examples/          # rewind_demo.py (README GIF), buggy_repo/ + fork_and_select_demo.py
 SPACE/             # vendored SPACE source (own .git); excluded from git, ruff, mypy
 ```
 
@@ -190,12 +190,11 @@ M5 fork-and-select + demo → M6 Linux SPACE host + integration → M7 benchmark
 AWS + exfiltration demo → M9 README.
 
 Status: M0–M5 and M9 done. M6 and M7 run on real SPACE through the integration workflow (Kind on a
-GitHub-hosted runner): forks, consistency tests and benchmarks pass, README has the real table (run
-39745156201). Left:
-- M6: confirm the 2 large-`execute` standard tests pass after the 10 MiB output cap change; resolve
-  the remaining open questions above.
+GitHub-hosted runner): all green in run 39752644201 (82 passed, 7 xfailed), README has the real
+benchmark table (run 39745156201). Left:
+- M6: resolve the remaining open questions above.
+- README: put the workflow's `rewind-demo.gif` in `docs/` and uncomment the image line.
 - M8: Secrets Manager + Private CA + an echo endpoint, then `tests/integration/test_space_credentials.py`.
-- README: record the demo GIF (placeholder comment in README.md).
 
 ## Testing philosophy
 - For every feature, write the failing test first. The consistency tests must show the bug with a plain

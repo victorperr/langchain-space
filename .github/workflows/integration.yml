@@ -23,6 +23,10 @@ on:
       benchmark_runs:
         description: Samples per latency benchmark
         default: "10"
+      record_demo:
+        description: Record examples/rewind_demo.py on real SPACE as a GIF
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -324,6 +328,30 @@ jobs:
             --runs "$BENCHMARK_RUNS" | tee benchmark-table.md
           { echo "## Benchmarks"; echo; cat benchmark-table.md; } >>"$GITHUB_STEP_SUMMARY"
 
+      - name: Log in to SPACE for the demo
+        if: ${{ !cancelled() && inputs.record_demo && steps.tests.outcome != 'skipped' }}
+        run: *login
+
+      # The README GIF. Real SPACE steps take seconds each; agg caps every pause at 1 s, so the
+      # GIF stays short while the printed timings still show the real durations.
+      - name: Record the rewind demo on real SPACE
+        if: ${{ !cancelled() && inputs.record_demo && steps.tests.outcome != 'skipped' }}
+        continue-on-error: true
+        env:
+          AGG_VERSION: v1.9.0
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq asciinema >/dev/null
+          curl -fsSL -o "$RUNNER_TEMP/agg" \
+            "https://github.com/asciinema/agg/releases/download/$AGG_VERSION/agg-x86_64-unknown-linux-gnu"
+          chmod +x "$RUNNER_TEMP/agg"
+          export TERM=xterm-256color
+          # `script` gives asciinema the terminal a CI step lacks.
+          script -q -e -c "asciinema rec --overwrite --cols 88 --rows 20 \
+            -c 'uv run python examples/rewind_demo.py --space --template $SPACE_TEMPLATE' \
+            rewind-demo.cast" /dev/null
+          "$RUNNER_TEMP/agg" --idle-time-limit 1 --font-size 18 rewind-demo.cast rewind-demo.gif
+          ls -lh rewind-demo.cast rewind-demo.gif
+
       - name: Fail if a setup step failed
         if: ${{ !cancelled() && (steps.ecw.outcome == 'failure' || steps.template.outcome == 'failure') }}
         run: |
@@ -354,6 +382,8 @@ jobs:
             integration-results.xml
             benchmark-table.md
             benchmarks/results/
+            rewind-demo.cast
+            rewind-demo.gif
             ${{ runner.temp }}/space-diagnostics/
           if-no-files-found: ignore
           retention-days: 30
