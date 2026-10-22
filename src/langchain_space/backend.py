@@ -77,7 +77,9 @@ class SpaceSandbox(BaseSandbox):
         sandbox_id: The SPACE sandbox to drive. It must be running.
         default_timeout: Seconds per command when the caller passes none; `None` defers to
             the client's default.
-        max_output_chars: Output beyond this is cut and `truncated` is set.
+        max_output_chars: Output of `execute` beyond this is cut and `truncated` is set. Not
+            applied to the read-only helpers' internal commands, whose output deepagents
+            parses and bounds itself.
         owns_sandbox: Whether `terminate()` should delete the sandbox.
         content_check: Called with `(content, where)` before anything is sent into the
             sandbox (commands, uploaded files); raising blocks it. Use
@@ -187,7 +189,8 @@ class SpaceSandbox(BaseSandbox):
         blocked = self._blocked(command.encode(), "command")
         if blocked is not None:
             return ExecuteResponse(output=blocked, exit_code=126)
-        if not _READ_ONLY.get():
+        read_only = _READ_ONLY.get()
+        if not read_only:
             # Bump before running: a command that fails halfway may still have written files.
             self._bump()
         effective_timeout = timeout if timeout is not None else self._default_timeout
@@ -195,8 +198,12 @@ class SpaceSandbox(BaseSandbox):
             self._sandbox_id, ["sh", "-c", command], timeout=effective_timeout
         )
         output = result.output
-        truncated = result.truncated or len(output) > self._max_output_chars
-        output = output[: self._max_output_chars]
+        truncated = result.truncated
+        # The read-only helpers parse their script's output (read returns one JSON document)
+        # and deepagents bounds it itself; cutting it would make large reads fail to parse.
+        if not read_only and len(output) > self._max_output_chars:
+            output = output[: self._max_output_chars]
+            truncated = True
         return ExecuteResponse(output=output, exit_code=result.exit_code, truncated=truncated)
 
     # Read-only helpers: same commands as `BaseSandbox`, without marking the sandbox dirty.

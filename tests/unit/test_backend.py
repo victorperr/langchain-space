@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 
 import pytest
@@ -43,6 +44,27 @@ class TestExecute:
         result = sandbox.execute("0123456789abcdef")
         assert result.truncated
         assert result.output.startswith("0123456789")
+
+    def test_read_is_not_cut_by_the_output_limit(self) -> None:
+        # BaseSandbox.read returns its file as one JSON line, bounded by deepagents itself
+        # (500 KiB). Cutting it at max_output_chars broke every read of a file larger than
+        # the limit; found on real SPACE by langchain-tests' large payload test.
+        payload = json.dumps({"encoding": "utf-8", "content": "x" * 1000})
+        fake = FakeSpaceClient(lambda sandbox, argv: (payload, 0))
+        sandbox = SpaceSandbox.create(fake, "t", max_output_chars=100)
+        result = sandbox.read("/home/user/big.txt")
+        assert result.error is None
+        assert result.file_data is not None
+        assert result.file_data["content"] == "x" * 1000
+        assert sandbox.execute("cat big.txt").truncated  # agent commands stay capped
+
+    async def test_async_read_is_not_cut_by_the_output_limit(self) -> None:
+        payload = json.dumps({"encoding": "utf-8", "content": "x" * 1000})
+        fake = FakeSpaceClient(lambda sandbox, argv: (payload, 0))
+        sandbox = SpaceSandbox.create(fake, "t", max_output_chars=100)
+        result = await sandbox.aread("/home/user/big.txt")
+        assert result.error is None
+        assert (await sandbox.aexecute("cat big.txt")).truncated
 
     def test_every_execute_bumps_generation(self, sandbox: SpaceSandbox) -> None:
         before = sandbox.generation

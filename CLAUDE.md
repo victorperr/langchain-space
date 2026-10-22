@@ -155,7 +155,12 @@ There is no SPACE Python SDK; we call the HTTP API with `httpx` + `httpx-sse`.
 - The fork `timeout` is the child's lifetime (u32 seconds, default 300; only `> 0` is validated). Does it
   still expire a *suspended* anchor? Is there a server-side cap? We request 7 days by default.
 - Does a fork inherit the source's `network_policy`? (`Snapshotter.restore` re-applies it to be safe.)
-- Does `seed` include python3? Does `files:read` with `length` past EOF return up to EOF?
+- `seed` has `python3` (BaseSandbox's python3 helper scripts ran on it) but no `python`
+  command (integration run 39670929305, SPACE b6ca1b2). Does `files:read` with `length` past
+  EOF return up to EOF?
+- Standard suite: `langchain-tests` 1.1.9 still expects relative glob paths, directories in glob
+  and `write` refusing existing files; deepagents 0.7 changed all three. Those 7 tests are
+  `xfail(strict=True)` in `tests/integration/test_standard.py`.
 - Confirm the exact `BaseSandbox` / `ExecuteResponse` / `FileUploadResponse` signatures in the installed
   `deepagents` version before writing `backend.py`.
 

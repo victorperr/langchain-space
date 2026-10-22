@@ -250,11 +250,17 @@ jobs:
             | sed -n '/^INSERT INTO api_keys/,/^);/p')"
           [[ -n "$sql" ]] || { echo "::error::seed-api-key.sh printed no INSERT"; exit 1; }
           kctl() { kubectl --context "kind-$SPACE_KIND_CLUSTER" -n space "$@"; }
-          read -r pg_user pg_db < <(kctl get secret space-postgres -o \
-            go-template='{{index .data "POSTGRES_USER" | base64decode}} {{index .data "POSTGRES_DB" | base64decode}}')
+          # The template prints no trailing newline, and `read` from `< <(...)` then returns 1,
+          # which `bash -e` turned into a silent exit. A here-string adds the newline.
+          creds="$(kctl get secret space-postgres -o \
+            go-template='{{index .data "POSTGRES_USER" | base64decode}} {{index .data "POSTGRES_DB" | base64decode}}')" \
+            || { echo "::error::Could not read the space-postgres secret"; exit 1; }
+          read -r pg_user pg_db <<<"$creds"
+          [[ -n "$pg_user" && -n "$pg_db" ]] || { echo "::error::space-postgres secret lacks POSTGRES_USER/POSTGRES_DB"; exit 1; }
           printf '%s\n' "$sql" | kctl exec -i sts/space-postgres -- \
             env PGHOST=127.0.0.1 PGSSLMODE=require \
-            psql -U "$pg_user" -d "$pg_db" -tA -v ON_ERROR_STOP=1
+            psql -U "$pg_user" -d "$pg_db" -tA -v ON_ERROR_STOP=1 \
+            || { echo "::error::Inserting the API key row failed"; exit 1; }
           code="$(printf 'header = "x-api-key: %s"\n' "$key" \
             | curl -s -o /dev/null -w '%{http_code}' --config - "$SPACE_ECW_API_URL/sandboxes")"
           echo "E2B-compatible GET /sandboxes -> HTTP $code"
