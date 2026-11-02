@@ -152,6 +152,29 @@ class TestSecretGuard:
             )
         assert fake.calls_to("create_sandbox") == []
 
+    def test_secret_sent_through_edit_is_not_sent(
+        self, fake: FakeSpaceClient, sandbox: SpaceSandbox
+    ) -> None:
+        # Deep Agents sends small edits base64-encoded inside the command, where a plain
+        # text check cannot see the secret.
+        result = sandbox.edit("/tmp/config.py", "TOKEN = ''", f"TOKEN = '{SECRET}'")
+        assert result.error is not None and "blocked" in result.error
+        assert fake.calls_to("run_command") == []
+        assert fake.calls_to("write_file") == []
+
+    async def test_secret_sent_through_async_edit_is_not_sent(
+        self, fake: FakeSpaceClient, sandbox: SpaceSandbox
+    ) -> None:
+        result = await sandbox.aedit("/tmp/config.py", SECRET, "x")
+        assert result.error is not None and "blocked" in result.error
+        assert fake.calls_to("run_command") == []
+
+    def test_secret_in_grep_pattern_is_not_sent(
+        self, fake: FakeSpaceClient, sandbox: SpaceSandbox
+    ) -> None:
+        assert sandbox.grep(SECRET, "/tmp").error is not None
+        assert fake.calls_to("run_command") == []
+
     def test_ordinary_content_passes(self, fake: FakeSpaceClient, sandbox: SpaceSandbox) -> None:
         assert sandbox.execute("echo hello").exit_code == 0
         assert sandbox.upload_files([("/tmp/a", b"hello")])[0].error is None

@@ -17,6 +17,7 @@ from deepagents.backends.protocol import (
     INVALID_PATH,
     IS_DIRECTORY,
     PERMISSION_DENIED,
+    EditResult,
     ExecuteResponse,
     FileDownloadResponse,
     FileUploadResponse,
@@ -264,6 +265,40 @@ class SpaceSandbox(BaseSandbox):
         """See `BaseSandbox.aglob`; does not bump `generation`."""
         with _read_only():
             return await super().aglob(pattern, path)
+
+    # `edit` sends small payloads base64-encoded inside its command, where `content_check`
+    # cannot see them, so the strings are checked here before `BaseSandbox` encodes them.
+
+    def _blocked_edit(self, file_path: str, old_string: str, new_string: str) -> EditResult | None:
+        content = f"{file_path}\n{old_string}\n{new_string}".encode()
+        blocked = self._blocked(content, f"edit {file_path}")
+        return EditResult(error=blocked) if blocked is not None else None
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        """See `BaseSandbox.edit`; `content_check` sees the strings before they are encoded."""
+        blocked = self._blocked_edit(file_path, old_string, new_string)
+        if blocked is not None:
+            return blocked
+        return super().edit(file_path, old_string, new_string, replace_all)
+
+    async def aedit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        """See `BaseSandbox.aedit`; `content_check` sees the strings before they are encoded."""
+        blocked = self._blocked_edit(file_path, old_string, new_string)
+        if blocked is not None:
+            return blocked
+        return await super().aedit(file_path, old_string, new_string, replace_all)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
         """Write each file, creating parent directories. Errors are reported per file."""
