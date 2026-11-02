@@ -359,7 +359,7 @@ jobs:
           ls -lh rewind-demo.cast rewind-demo.gif
 
       - name: Log in to SPACE for the market demo
-        if: ${{ !cancelled() && inputs.record_demo && steps.tests.outcome != 'skipped' }}
+        if: ${{ !cancelled() && inputs.record_demo_market_competitor && steps.tests.outcome != 'skipped' }}
         continue-on-error: true
         run: *login
 
