@@ -10,7 +10,12 @@ from langgraph.graph import END, START, StateGraph
 
 from langchain_space.checkpointer import SpaceCheckpointer
 from langchain_space.client import SpaceError
-from langchain_space.snapshots import SPACE_METADATA_KEY, MissingSnapshotError
+from langchain_space.snapshots import (
+    SPACE_METADATA_KEY,
+    MissingSnapshotError,
+    ProviderMismatchError,
+    SnapshotBinding,
+)
 from langchain_space.testing import FakeSpaceClient
 from langchain_space.testing.graphs import EDIT_FILE, build_edit_graph, find_state, thread
 
@@ -170,9 +175,11 @@ def test_write_before_commit(fake: FakeSpaceClient, saver: SpaceCheckpointer) ->
     assert file_in(fake, newest_anchor) == b"v1"
 
 
-def test_rewind_forks_new_sandbox_and_leaves_old_one_untouched(
-    fake: FakeSpaceClient, saver: SpaceCheckpointer
-) -> None:
+def test_rewind_forks_new_sandbox_and_leaves_old_one_untouched(fake: FakeSpaceClient) -> None:
+    # Keep retired sandboxes (deleted eagerly by default) so the old one can be inspected.
+    saver = SpaceCheckpointer(
+        InMemorySaver(), fake, template="code-runtime", delete_retired_eagerly=False
+    )
     graph = build_edit_graph(saver.backend, saver)
     for target in ("v1", "v2"):
         graph.invoke({"target": target}, thread("t"))
@@ -281,6 +288,46 @@ def test_a_new_process_restores_from_stored_bindings(fake: FakeSpaceClient) -> N
     third = SpaceCheckpointer(storage, fake, template="code-runtime")
     result = build_edit_graph(third.backend, third).invoke({"target": "v4"}, thread("t"))
     assert result["observed"][-1] == "v3"
+
+
+class OtherProvider(FakeSpaceClient):
+    """A fake that claims to be another sandbox provider."""
+
+    provider = "other"
+
+
+def test_checkpoints_record_their_provider(saver: SpaceCheckpointer) -> None:
+    build_edit_graph(saver.backend, saver).invoke({"target": "v1"}, thread("t"))
+    stored = list(saver.inner.list(thread("t")))
+    assert {t.metadata[SPACE_METADATA_KEY]["provider"] for t in stored} == {"space"}
+
+
+def test_checkpoints_from_another_provider_are_refused(fake: FakeSpaceClient) -> None:
+    storage = InMemorySaver()
+    first = SpaceCheckpointer(storage, fake, template="code-runtime")
+    graph = build_edit_graph(first.backend, first)
+    for target in ("v1", "v2"):
+        graph.invoke({"target": target}, thread("t"))
+
+    other = OtherProvider()
+    second = SpaceCheckpointer(storage, other, template="code-runtime")
+    graph = build_edit_graph(second.backend, second)
+    after_v1 = find_state(graph, "t", target="v1", finished=True)
+
+    with pytest.raises(ProviderMismatchError, match="saved with space sandboxes"):
+        graph.invoke({"target": "v3"}, after_v1.config)  # rewind
+    with pytest.raises(ProviderMismatchError):
+        graph.invoke({"target": "v3"}, thread("t"))  # continue the latest checkpoint
+    assert other.calls == []  # nothing was created, forked or restored
+    assert second.registry.retired == []
+
+
+def test_checkpoints_saved_before_providers_were_recorded_still_restore() -> None:
+    old = SnapshotBinding.from_metadata(
+        {SPACE_METADATA_KEY: {"template": "code-runtime", "anchor_id": "sbx_1"}}
+    )
+    assert old.provider is None
+    old.check_provider("langsmith")  # not checked: no error
 
 
 async def test_async_api_is_consistent(saver: SpaceCheckpointer) -> None:

@@ -73,9 +73,8 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         anchor_lifetime_seconds: Lifetime requested for snapshot anchors.
         backend_kwargs: Extra arguments for each `SpaceSandbox` (e.g. `default_timeout`).
         delete_retired_eagerly: Delete sandboxes left behind by a rewind or fork as soon
-            as the next checkpoint is saved, instead of keeping them running until
-            `close()`. Recommended for long-lived servers; leave it off if several runs may
-            use the same thread at once.
+            as the next checkpoint is saved (default), instead of keeping them running until
+            `close()`. Turn it off only if several runs may use the same thread at once.
     """
 
     def __init__(
@@ -88,7 +87,7 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         network_policy: Mapping[str, Any] | None = None,
         anchor_lifetime_seconds: int | None = None,
         backend_kwargs: Mapping[str, Any] | None = None,
-        delete_retired_eagerly: bool = False,
+        delete_retired_eagerly: bool = True,
     ) -> None:
         super().__init__(serde=inner.serde)
         self._delete_retired_eagerly = delete_retired_eagerly
@@ -139,12 +138,14 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
             with contextlib.suppress(Exception):
                 self.registry.delete_retired()
 
-    @staticmethod
-    def _validate(checkpoint_tuple: CheckpointTuple | None) -> None:
+    def _validate(self, checkpoint_tuple: CheckpointTuple | None) -> None:
         if checkpoint_tuple is None:
             return
         if checkpoint_tuple.config["configurable"].get("checkpoint_ns", ROOT_NS) == ROOT_NS:
-            SnapshotBinding.from_metadata(checkpoint_tuple.metadata)  # raises if missing
+            binding = SnapshotBinding.from_metadata(checkpoint_tuple.metadata)  # raises if missing
+            # Checked here, when a run loads its checkpoint, so the run fails before it starts
+            # (a failure while saving in the background would leave the next step waiting).
+            binding.check_provider(self.registry.snapshotter.provider)
 
     def sandbox(self, thread_id: str) -> SpaceSandbox:
         """The sandbox for `thread_id` at its current position (e.g. to inspect files)."""
@@ -170,7 +171,7 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
                 referenced.add(anchor_id)
         deleted = [a for a in candidates if a not in referenced]
         for anchor_id in deleted:
-            self.client.delete_sandbox(anchor_id)
+            self.client.delete_anchor(anchor_id)
         gone = set(deleted)
         self.registry.anchors = [a for a in self.registry.anchors if a not in gone]
         return deleted
@@ -187,7 +188,10 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         return self.inner.config_specs
 
     def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
-        """Load a checkpoint, refusing root checkpoints that have no snapshot binding.
+        """Load a checkpoint, refusing root checkpoints this checkpointer cannot restore.
+
+        Raises `MissingSnapshotError` (no snapshot binding) or `ProviderMismatchError`
+        (saved with another sandbox provider).
 
         Loading does not move the sandbox: LangGraph also loads checkpoints just to inspect
         them. The thread moves when a run saves or works on top of another checkpoint.

@@ -82,6 +82,9 @@ class FakeSpaceClient:
         exec_handler: Simulates `run_command`. Defaults to `unsupported_exec`.
     """
 
+    provider = "space"
+    """The fake simulates SPACE."""
+
     def __init__(self, exec_handler: ExecHandler | None = None) -> None:
         self.exec_handler: ExecHandler = exec_handler or unsupported_exec
         self.sandboxes: dict[str, FakeSandbox] = {}
@@ -261,6 +264,24 @@ class FakeSpaceClient:
         """See `SpaceClient.wake`."""
         self._record("wake", sandbox_id=sandbox_id)
         self.sandbox(sandbox_id).state = "running"
+
+    def create_anchor(self, sandbox_id: str, *, lifetime_seconds: int | None = None) -> str:
+        """See `SpaceClient.create_anchor`. Same recipe as SPACE: a suspended fork."""
+        anchor_id = self.fork(sandbox_id, lifetime_seconds=lifetime_seconds)
+        try:
+            self.suspend(anchor_id)
+        except BaseException:
+            self.delete_sandbox(anchor_id)
+            raise
+        return anchor_id
+
+    def restore_anchor(self, anchor_id: str) -> str:
+        """See `SpaceClient.restore_anchor`."""
+        return self.fork(anchor_id)
+
+    def delete_anchor(self, anchor_id: str) -> None:
+        """See `SpaceClient.delete_anchor`."""
+        self.delete_sandbox(anchor_id)
 
     def register_credential_reference(self, secret_arn: str) -> str:
         """See `SpaceClient.register_credential_reference`."""

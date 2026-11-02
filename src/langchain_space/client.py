@@ -12,11 +12,14 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
 import os
 import random
+import threading
 import time
 import uuid
 from collections.abc import Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Literal, Protocol, Self, runtime_checkable
@@ -26,6 +29,8 @@ import httpx
 from httpx_sse import connect_sse
 
 FileType = Literal["file", "directory", "symlink", "other"]
+
+logger = logging.getLogger(__name__)
 
 MIB = 1024 * 1024
 _FIRST_POLL_DELAY = 0.05
@@ -100,6 +105,10 @@ class SpaceClient(Protocol):
     as complete, so callers never see a half-created sandbox.
     """
 
+    provider: str
+    """Which sandbox provider this client talks to (`"space"`, `"langsmith"`). Stored in every
+    checkpoint, so a checkpoint is never restored with another provider's client."""
+
     def create_sandbox(
         self,
         template: str,
@@ -165,6 +174,21 @@ class SpaceClient(Protocol):
         """Bring a paused or suspended sandbox back to running."""
         ...
 
+    def create_anchor(self, sandbox_id: str, *, lifetime_seconds: int | None = None) -> str:
+        """Save an immutable copy of the sandbox's filesystem (an anchor); return its id.
+
+        The sandbox keeps running unchanged. An anchor is never run, only restored from.
+        """
+        ...
+
+    def restore_anchor(self, anchor_id: str) -> str:
+        """Create a new running sandbox from an anchor and return its id."""
+        ...
+
+    def delete_anchor(self, anchor_id: str) -> None:
+        """Delete an anchor. Deleting an already-deleted anchor is not an error."""
+        ...
+
     def register_credential_reference(self, secret_arn: str) -> str:
         """Register an AWS Secrets Manager secret by reference; return its reference id."""
         ...
@@ -202,13 +226,26 @@ class HttpSpaceClient:
         ecw_api_url: Origin of the E2B-compatible API host. Required only for `fork`.
         ecw_api_key: API key enabled for the `ecw` surface, sent as `X-API-Key`.
         default_command_timeout: Seconds used when `run_command(timeout=None)`.
-        default_fork_lifetime: Seconds a forked sandbox may live when not specified.
+        default_fork_lifetime: Seconds a forked sandbox may live when not specified (anchors,
+            and other forks unless `live_lifetime` is set).
+        live_lifetime: Opt-in shorter lifetime, in seconds, for forks that run: sandboxes
+            restored from an anchor and `fork_and_select` branches. Limits how long they
+            survive a crashed process. Unverified on real SPACE: if the lifetime is a hard
+            kill, a thread unused for longer loses its live sandbox.
+        idle_timeout: Opt-in: seconds without activity after which SPACE suspends a sandbox
+            created from a template (`idle_timeout` + `idle_action: "suspend"`). Unverified
+            on real SPACE: whether a command wakes a suspended sandbox.
+        suspend_anchors_in_background: Return an anchor as soon as its fork exists and
+            suspend it in a background thread (saves the suspend time, about 6 s, per
+            snapshot). Restoring or deleting that anchor first waits for its suspend.
         ready_timeout: Seconds to wait for an operation or a sandbox state.
         poll_interval: Longest pause between status polls (polling starts faster).
         max_output_bytes: Command output kept in memory; the rest is read and dropped,
             and the result is marked `truncated`.
         http: Optional preconfigured `httpx.Client` (tests inject a mocked transport).
     """
+
+    provider = "space"
 
     def __init__(
         self,
@@ -220,6 +257,9 @@ class HttpSpaceClient:
         ecw_api_key: str | None = None,
         default_command_timeout: float = 1800,
         default_fork_lifetime: int = 7 * 24 * 3600,
+        live_lifetime: int | None = None,
+        idle_timeout: int | None = None,
+        suspend_anchors_in_background: bool = True,
         ready_timeout: float = 300,
         poll_interval: float = 0.5,
         request_timeout: float = 60,
@@ -234,6 +274,17 @@ class HttpSpaceClient:
         self._ecw_api_key = ecw_api_key
         self.default_command_timeout = default_command_timeout
         self.default_fork_lifetime = default_fork_lifetime
+        if live_lifetime is not None and live_lifetime <= 0:
+            raise ValueError("live_lifetime must be > 0")
+        if idle_timeout is not None and idle_timeout <= 0:
+            raise ValueError("idle_timeout must be > 0")
+        self.live_lifetime = live_lifetime
+        self.idle_timeout = idle_timeout
+        self._background_suspend = suspend_anchors_in_background
+        self._suspends: dict[str, Future[None]] = {}
+        """Anchors whose background suspend may still be running."""
+        self._suspend_pool: ThreadPoolExecutor | None = None
+        self._suspend_lock = threading.Lock()
         self._ready_timeout = ready_timeout
         self._poll_interval = poll_interval
         self._request_timeout = request_timeout
@@ -269,7 +320,14 @@ class HttpSpaceClient:
         )
 
     def close(self) -> None:
-        """Close the underlying HTTP client if this instance created it."""
+        """Finish background suspends, then close the HTTP client if this instance created it."""
+        with self._suspend_lock:
+            pending = list(self._suspends)
+        for anchor_id in pending:
+            self._await_suspend(anchor_id)
+        if self._suspend_pool is not None:
+            self._suspend_pool.shutdown(wait=True)
+            self._suspend_pool = None
         if self._owns_http:
             self._http.close()
 
@@ -302,6 +360,9 @@ class HttpSpaceClient:
             body["metadata"] = dict(metadata)
         if network_policy is not None:
             body["network_policy"] = dict(network_policy)
+        if self.idle_timeout is not None:
+            body["idle_timeout"] = f"{self.idle_timeout}s"
+            body["idle_action"] = "suspend"
         created = self._json("POST", "/v1/sandboxes", body=body, mutation=True, expect=(202,))
         sandbox_id = _str(created, "sandbox_id")
         try:
@@ -346,6 +407,52 @@ class HttpSpaceClient:
         self._lifecycle(sandbox_id, "wake")
         self._wait_running(sandbox_id)
 
+    def create_anchor(self, sandbox_id: str, *, lifetime_seconds: int | None = None) -> str:
+        """See `SpaceClient.create_anchor`. On SPACE an anchor is a suspended fork.
+
+        With `suspend_anchors_in_background`, the anchor is returned once its fork exists.
+        If the background suspend fails, the anchor stays running: still a correct copy
+        (nothing runs commands in it), only more expensive.
+        """
+        lifetime = lifetime_seconds or self.default_fork_lifetime
+        anchor_id = self.fork(sandbox_id, lifetime_seconds=lifetime)
+        if self._background_suspend:
+            with self._suspend_lock:
+                if self._suspend_pool is None:
+                    self._suspend_pool = ThreadPoolExecutor(thread_name_prefix="space-suspend")
+                self._suspends[anchor_id] = self._suspend_pool.submit(self.suspend, anchor_id)
+            return anchor_id
+        try:
+            self.suspend(anchor_id)
+        except BaseException:
+            self._best_effort_delete(anchor_id)
+            raise
+        return anchor_id
+
+    def restore_anchor(self, anchor_id: str) -> str:
+        """See `SpaceClient.restore_anchor`. Forks the suspended anchor."""
+        self._await_suspend(anchor_id)
+        return self.fork(anchor_id)
+
+    def delete_anchor(self, anchor_id: str) -> None:
+        """See `SpaceClient.delete_anchor`. An anchor is a sandbox on SPACE."""
+        self._await_suspend(anchor_id)
+        self.delete_sandbox(anchor_id)
+
+    def _await_suspend(self, anchor_id: str) -> None:
+        """Wait for the anchor's background suspend, if one is pending. Never raises."""
+        with self._suspend_lock:
+            pending = self._suspends.pop(anchor_id, None)
+        if pending is None:
+            return
+        try:
+            pending.result()
+        except Exception:
+            # The anchor stays running, which is still a correct copy to fork from.
+            logger.warning(
+                "suspending anchor %s failed; it stays running", anchor_id, exc_info=True
+            )
+
     def fork(self, sandbox_id: str, *, lifetime_seconds: int | None = None) -> str:
         """See `SpaceClient.fork`. Uses the E2B-compatible route (disk-only fork)."""
         if self._ecw_api_url is None or self._ecw_api_key is None:
@@ -353,7 +460,7 @@ class HttpSpaceClient:
                 "fork needs ecw_api_url and ecw_api_key (SPACE's E2B-compatible API)",
                 code="not_configured",
             )
-        lifetime = lifetime_seconds or self.default_fork_lifetime
+        lifetime = lifetime_seconds or self.live_lifetime or self.default_fork_lifetime
         response = self._request(
             "POST",
             f"{self._ecw_api_url}/sandboxes/{_q(_ecw_sandbox_id(sandbox_id))}/fork",

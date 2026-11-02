@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 from collections.abc import Iterator
 from typing import Any
 
@@ -382,6 +383,160 @@ class TestFork:
         with HttpSpaceClient(API, DATA_PLANE, "tok") as plain, pytest.raises(SpaceError) as info:
             plain.fork("sbx_1")
         assert info.value.code == "not_configured"
+
+
+GRANDCHILD_UUID = "019d84bd-7777-7331-99c6-b63377f3a3a2"
+GRANDCHILD = f"sbx_{GRANDCHILD_UUID}"
+
+
+def mock_anchor_states(mock: respx.MockRouter, sandbox_id: str) -> None:
+    """A fork that comes up `running`, and reports `suspended` once suspended."""
+    suspended = threading.Event()
+
+    def state(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"id": sandbox_id, "state": "suspended" if suspended.is_set() else "running"}
+        )
+
+    def suspend(request: httpx.Request) -> httpx.Response:
+        suspended.set()
+        return httpx.Response(202, json={"operation_id": "op_suspend"})
+
+    mock.get(f"{API}/v1/sandboxes/{sandbox_id}").mock(side_effect=state)
+    mock.get(f"{API}/v1/sandboxes/{sandbox_id}/processes", params={"limit": "1"}).respond(
+        json={"data": []}
+    )
+    mock.get(f"{API}/v1/operations/op_suspend").respond(json={"state": "succeeded"})
+    mock.post(f"{API}/v1/sandboxes/{sandbox_id}:suspend").mock(side_effect=suspend)
+
+
+def gate_route(route: respx.Route, gate: threading.Event, log: list[str], name: str) -> None:
+    """Make `route` wait for `gate`, then record `name` and answer as before."""
+    answer = route.side_effect
+
+    def gated(request: httpx.Request) -> httpx.Response:
+        gate.wait(5)
+        log.append(name)
+        return answer(request)  # type: ignore[no-any-return,operator]
+
+    route.mock(side_effect=gated)
+
+
+class TestLifecycleSettings:
+    def test_idle_timeout_asks_space_to_suspend_idle_sandboxes(
+        self, mock: respx.MockRouter
+    ) -> None:
+        create = mock.post(f"{API}/v1/sandboxes").respond(
+            202, json={"sandbox_id": "sbx_1", "operation_id": "op_1"}
+        )
+        mock.get(f"{API}/v1/operations/op_1").respond(json={"state": "succeeded"})
+        mock_running(mock, "sbx_1")
+        with HttpSpaceClient(API, DATA_PLANE, "tok", idle_timeout=600) as http:
+            http.create_sandbox("code-runtime")
+        body = json.loads(create.calls.last.request.content)
+        assert (body["idle_timeout"], body["idle_action"]) == ("600s", "suspend")
+
+    def test_live_lifetime_applies_to_running_forks_not_anchors(
+        self, mock: respx.MockRouter
+    ) -> None:
+        anchor_fork = mock.post(f"{ECW}/sandboxes/{SRC_UUID}/fork").respond(
+            201, json=[{"sandboxID": CHILD_UUID}]
+        )
+        restore_fork = mock.post(f"{ECW}/sandboxes/{CHILD_UUID}/fork").respond(
+            201, json=[{"sandboxID": GRANDCHILD_UUID}]
+        )
+        mock_anchor_states(mock, CHILD)
+        mock_running(mock, GRANDCHILD)
+        with HttpSpaceClient(
+            API, DATA_PLANE, "tok", ecw_api_url=ECW, ecw_api_key="k", live_lifetime=3600
+        ) as http:
+            anchor = http.create_anchor(SRC)
+            http.restore_anchor(anchor)
+        assert json.loads(anchor_fork.calls.last.request.content)["timeout"] == 7 * 24 * 3600
+        assert json.loads(restore_fork.calls.last.request.content)["timeout"] == 3600
+
+    @pytest.mark.parametrize("bad", [{"live_lifetime": 0}, {"idle_timeout": -1}])
+    def test_settings_must_be_positive(self, bad: dict[str, int]) -> None:
+        with pytest.raises(ValueError):
+            HttpSpaceClient(API, DATA_PLANE, "tok", **bad)
+
+
+class TestBackgroundSuspend:
+    def test_anchor_is_returned_before_its_suspend_finishes(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        gate, log = threading.Event(), list[str]()
+        mock.post(f"{ECW}/sandboxes/{SRC_UUID}/fork").respond(201, json=[{"sandboxID": CHILD_UUID}])
+        mock_anchor_states(mock, CHILD)
+        gate_route(mock.routes[-1], gate, log, "suspend")  # the :suspend route
+
+        assert client.create_anchor(SRC) == CHILD  # returned while the suspend is blocked
+        assert log == []
+        gate.set()
+        client.close()  # waits for the background suspend
+        assert log == ["suspend"]
+
+    def test_restore_waits_for_the_anchor_suspend(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        gate, log = threading.Event(), list[str]()
+        mock.post(f"{ECW}/sandboxes/{SRC_UUID}/fork").respond(201, json=[{"sandboxID": CHILD_UUID}])
+        mock_anchor_states(mock, CHILD)
+        gate_route(mock.routes[-1], gate, log, "suspend")
+        mock_running(mock, GRANDCHILD)
+
+        def restore(request: httpx.Request) -> httpx.Response:
+            log.append("restore")
+            return httpx.Response(201, json=[{"sandboxID": GRANDCHILD_UUID}])
+
+        mock.post(f"{ECW}/sandboxes/{CHILD_UUID}/fork").mock(side_effect=restore)
+
+        anchor = client.create_anchor(SRC)
+        threading.Timer(0.2, gate.set).start()
+        assert client.restore_anchor(anchor) == GRANDCHILD
+        assert log == ["suspend", "restore"]
+
+    def test_failed_background_suspend_keeps_a_usable_anchor(
+        self, client: HttpSpaceClient, mock: respx.MockRouter, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mock.post(f"{ECW}/sandboxes/{SRC_UUID}/fork").respond(201, json=[{"sandboxID": CHILD_UUID}])
+        mock.post(f"{ECW}/sandboxes/{CHILD_UUID}/fork").respond(
+            201, json=[{"sandboxID": GRANDCHILD_UUID}]
+        )
+        mock_running(mock, CHILD)
+        mock_running(mock, GRANDCHILD)
+        mock.post(f"{API}/v1/sandboxes/{CHILD}:suspend").respond(
+            400, json={"code": "invalid_request", "message": "cannot suspend", "retryable": False}
+        )
+        delete = mock.delete(f"{API}/v1/sandboxes/{CHILD}")
+
+        anchor = client.create_anchor(SRC)
+        assert client.restore_anchor(anchor) == GRANDCHILD  # forks the still-running anchor
+        assert not delete.called  # its checkpoint may already reference it
+        assert "suspending anchor" in caplog.text
+
+    def test_without_background_suspend_a_failed_suspend_deletes_the_fork(
+        self, mock: respx.MockRouter
+    ) -> None:
+        mock.post(f"{ECW}/sandboxes/{SRC_UUID}/fork").respond(201, json=[{"sandboxID": CHILD_UUID}])
+        mock_running(mock, CHILD)
+        mock.post(f"{API}/v1/sandboxes/{CHILD}:suspend").respond(
+            400, json={"code": "invalid_request", "message": "cannot suspend", "retryable": False}
+        )
+        delete = mock.delete(f"{API}/v1/sandboxes/{CHILD}").respond(404)
+        with (
+            HttpSpaceClient(
+                API,
+                DATA_PLANE,
+                "tok",
+                ecw_api_url=ECW,
+                ecw_api_key="k",
+                suspend_anchors_in_background=False,
+            ) as http,
+            pytest.raises(SpaceError, match="cannot suspend"),
+        ):
+            http.create_anchor(SRC)
+        assert delete.called
 
 
 class TestCredentials:

@@ -12,7 +12,11 @@ from langchain_space.credentials import (
     retire,
 )
 from langchain_space.fork import BranchResult, ForkResult, fork_and_select
-from langchain_space.snapshots import MissingSnapshotError, SnapshotBinding
+from langchain_space.snapshots import (
+    MissingSnapshotError,
+    ProviderMismatchError,
+    SnapshotBinding,
+)
 
 __all__ = [
     "BranchResult",
@@ -21,6 +25,7 @@ __all__ = [
     "ForkResult",
     "HttpSpaceClient",
     "MissingSnapshotError",
+    "ProviderMismatchError",
     "SecretGuard",
     "SecretLeakError",
     "SnapshotBinding",

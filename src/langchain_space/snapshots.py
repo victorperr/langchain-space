@@ -1,10 +1,10 @@
 """Binding LangGraph checkpoints to SPACE snapshots ("anchors").
 
-An *anchor* is a suspended sandbox forked from a live sandbox. It is never run again, only
-forked from, so it is an immutable snapshot of a filesystem. Every checkpoint records the
-anchor holding the sandbox state it corresponds to (`SnapshotBinding`). Moving a thread to an
-older checkpoint forks a **new** sandbox from that checkpoint's anchor; nothing another
-branch may still use is ever mutated.
+An *anchor* is an immutable copy of a live sandbox's filesystem, made by the client's
+`create_anchor` (on SPACE a suspended fork, on LangSmith a filesystem snapshot). It is never run,
+only restored from. Every checkpoint records the anchor holding the sandbox state it corresponds
+to (`SnapshotBinding`). Moving a thread to an older checkpoint creates a **new** sandbox from that
+checkpoint's anchor; nothing another branch may still use is ever mutated.
 
 How the registry knows where a thread is: from checkpoint *lineage*, not from loads.
 LangGraph passes the parent checkpoint id to every `put`, and every task knows the
@@ -21,7 +21,6 @@ checkpoint it runs on top of (its base). So:
 
 from __future__ import annotations
 
-import contextlib
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -44,25 +43,47 @@ class MissingSnapshotError(LookupError):
     """A checkpoint has no SPACE snapshot binding, so its sandbox state cannot be restored."""
 
 
+class ProviderMismatchError(ValueError):
+    """A checkpoint's snapshot was made by another sandbox provider than the checkpointer's.
+
+    A SPACE anchor cannot be restored with LangSmith, and the other way round. Use a
+    `SpaceCheckpointer` whose client is from the provider that saved the checkpoint.
+    """
+
+
 @dataclass(frozen=True)
 class SnapshotBinding:
     """The sandbox state a checkpoint corresponds to.
 
     `anchor_id=None` means "pristine": no sandbox had been used yet, so the state is a fresh
     sandbox from `template`. That is an explicit state, not a missing snapshot.
+
+    `provider` names the sandbox provider the template and anchor belong to (`"space"`,
+    `"langsmith"`). It is None for checkpoints saved before it was recorded; those are not
+    checked.
     """
 
     template: str
     anchor_id: str | None = None
+    provider: str | None = None
 
     @property
     def pristine(self) -> bool:
         """True when the state is a fresh sandbox from `template`."""
         return self.anchor_id is None
 
+    def check_provider(self, provider: str) -> None:
+        """Raise `ProviderMismatchError` if this state was saved with another provider."""
+        if self.provider is not None and self.provider != provider:
+            raise ProviderMismatchError(
+                f"this checkpoint was saved with {self.provider} sandboxes, but this "
+                f"checkpointer uses {provider}; restore it with a SpaceCheckpointer whose "
+                f"client is a {self.provider} client"
+            )
+
     def to_metadata(self) -> dict[str, str | None]:
         """Serialize for `CheckpointMetadata`."""
-        return {"template": self.template, "anchor_id": self.anchor_id}
+        return {"template": self.template, "anchor_id": self.anchor_id, "provider": self.provider}
 
     @classmethod
     def from_metadata(cls, metadata: Mapping[str, Any] | None) -> SnapshotBinding:
@@ -77,8 +98,12 @@ class SnapshotBinding:
                 "checkpoint has no SPACE snapshot binding; it was not saved by "
                 "SpaceCheckpointer, so its sandbox state cannot be restored"
             )
-        anchor_id = raw.get("anchor_id")
-        return cls(raw["template"], anchor_id if isinstance(anchor_id, str) else None)
+        anchor_id, provider = raw.get("anchor_id"), raw.get("provider")
+        return cls(
+            raw["template"],
+            anchor_id if isinstance(anchor_id, str) else None,
+            provider if isinstance(provider, str) else None,
+        )
 
 
 class Snapshotter:
@@ -110,24 +135,27 @@ class Snapshotter:
         """The network policy every restored sandbox gets."""
         return self._network_policy
 
+    @property
+    def provider(self) -> str:
+        """The client's sandbox provider, recorded in every binding."""
+        return self.client.provider
+
     def anchor(self, sandbox_id: str) -> str:
-        """Fork `sandbox_id` into a suspended, never-again-run anchor; return its id."""
-        anchor_id = self.client.fork(sandbox_id, lifetime_seconds=self._anchor_lifetime)
-        try:
-            self.client.suspend(anchor_id)
-        except BaseException:
-            with contextlib.suppress(Exception):
-                self.client.delete_sandbox(anchor_id)
-            raise
-        return anchor_id
+        """Save an immutable, never-again-run copy of `sandbox_id`; return the anchor id."""
+        return self.client.create_anchor(sandbox_id, lifetime_seconds=self._anchor_lifetime)
 
     def restore(self, binding: SnapshotBinding) -> str:
-        """Create a new running sandbox in the state `binding` describes; return its id."""
+        """Create a new running sandbox in the state `binding` describes; return its id.
+
+        Raises:
+            ProviderMismatchError: `binding` was saved with another provider.
+        """
+        binding.check_provider(self.provider)
         if binding.anchor_id is None:
             return self.client.create_sandbox(
                 binding.template, env=self._env, network_policy=self._network_policy
             )
-        sandbox_id = self.client.fork(binding.anchor_id)
+        sandbox_id = self.client.restore_anchor(binding.anchor_id)
         if self._network_policy is not None:
             self.client.set_network_policy(sandbox_id, self._network_policy)
         return sandbox_id
@@ -271,13 +299,15 @@ class SandboxRegistry:
     def _move_to(self, slot: _Thread, thread_id: str, checkpoint_id: str | None) -> None:
         """Position the thread at `checkpoint_id` (None = before its first checkpoint)."""
         if checkpoint_id is None:
-            binding = SnapshotBinding(self.template)
+            binding = self._binding()
         else:
             found = self._lookup(slot, thread_id, checkpoint_id)
             if found is None:
                 raise MissingSnapshotError(
                     f"checkpoint {checkpoint_id} of thread {thread_id} has no snapshot binding"
                 )
+            # Fail before retiring anything: the thread stays where it is.
+            found.check_provider(self.snapshotter.provider)
             binding = found
         live = slot.live
         if live is not None and not (live.clean and live.anchor_id == binding.anchor_id):
@@ -287,20 +317,24 @@ class SandboxRegistry:
             slot.live = None
         slot.position, slot.position_binding = checkpoint_id, binding
 
+    def _binding(self, anchor_id: str | None = None) -> SnapshotBinding:
+        """A binding for this registry's template and provider."""
+        return SnapshotBinding(self.template, anchor_id, self.snapshotter.provider)
+
     def _current_binding(self, slot: _Thread) -> SnapshotBinding:
         live = slot.live
         if live is None:
-            return slot.position_binding or SnapshotBinding(self.template)
+            return slot.position_binding or self._binding()
         if not live.clean:
             generation = live.backend.generation
             live.anchor_id = self.snapshotter.anchor(live.backend.id)
             live.anchored_generation = generation
             self.anchors.append(live.anchor_id)
-        return SnapshotBinding(self.template, live.anchor_id)
+        return self._binding(live.anchor_id)
 
     def _materialize(self, slot: _Thread) -> SpaceSandbox:
         if slot.live is None:
-            binding = slot.position_binding or SnapshotBinding(self.template)
+            binding = slot.position_binding or self._binding()
             backend = self._wrap(self.snapshotter.restore(binding))
             slot.live = _Live(backend, binding.anchor_id, backend.generation)
         return slot.live.backend

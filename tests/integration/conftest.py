@@ -57,4 +57,4 @@ def space_saver(
         saver.close()
         for anchor_id in saver.registry.anchors:
             with contextlib.suppress(Exception):
-                forking_client.delete_sandbox(anchor_id)
+                forking_client.delete_anchor(anchor_id)

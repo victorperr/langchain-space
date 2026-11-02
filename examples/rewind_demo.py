@@ -79,7 +79,7 @@ def langchain_space(client: SpaceClient, template: str) -> Iterator[Any]:
         saver.close()
         for anchor_id in saver.registry.anchors:  # anchors are ours to clean up in a demo
             with contextlib.suppress(Exception):
-                client.delete_sandbox(anchor_id)
+                client.delete_anchor(anchor_id)
 
 
 def main() -> None:
