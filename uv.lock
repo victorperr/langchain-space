@@ -865,6 +865,11 @@ dependencies = [
     { name = "langgraph-checkpoint" },
 ]
 
+[package.optional-dependencies]
+langsmith = [
+    { name = "langsmith" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "langchain-tests" },
@@ -883,7 +888,9 @@ requires-dist = [
     { name = "langchain-core", specifier = ">=1.0" },
     { name = "langgraph", specifier = ">=1.2" },
     { name = "langgraph-checkpoint", specifier = ">=4.3" },
+    { name = "langsmith", extras = ["sandbox"], marker = "extra == 'langsmith'", specifier = ">=0.14.11" },
 ]
+provides-extras = ["langsmith"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -16,6 +16,11 @@ dependencies = [
     "httpx-sse>=0.4",
 ]
 
+[project.optional-dependencies]
+# LangSmith sandboxes instead of SPACE (`langchain_space.langsmith`). The `sandbox` extra brings
+# the command transport; 0.14.11 is the version the client was written against.
+langsmith = ["langsmith[sandbox]>=0.14.11"]
+
 [dependency-groups]
 dev = [
     "pytest>=8",
@@ -54,6 +59,7 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
     "integration: needs a running SPACE deployment (SPACE_API_URL etc.)",
     "consistency: rewind/fork correctness tests (the core claim)",
+    "langsmith: needs real LangSmith sandboxes (LANGSMITH_API_KEY)",
 ]
-addopts = "-m 'not integration' --import-mode=importlib"
+addopts = "-m 'not integration and not langsmith' --import-mode=importlib"
 norecursedirs = ["SPACE", ".venv"]
