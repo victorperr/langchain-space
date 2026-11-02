@@ -176,6 +176,36 @@ agent.invoke({"messages": [{"role": "user", "content": "Try another approach"}]}
 
 Outside an agent, `SpaceSandbox.create(client, "code-runtime")` is a plain backend that you can use from a script.
 
+### On LangSmith sandboxes
+
+Although SPACE is the main target, we propose a design that also works with
+[LangSmith sandboxes](https://docs.langchain.com/oss/python/integrations/sandboxes/langsmith),
+since you may already use LangSmith to trace your agents. LangSmith sandboxes are hosted by
+LangChain for you, so there is nothing to install on your machine.
+
+You only change the client, in three steps:
+
+1. Install the LangSmith extra: `uv add "langchain-space[langsmith]"`
+2. Set your LangSmith API key: `export LANGSMITH_API_KEY=...`
+3. Replace `HttpSpaceClient.from_env()` with `LangSmithClient()` in the Quickstart code:
+
+```python
+from langchain_space.langsmith import LangSmithClient
+
+saver = SpaceCheckpointer(InMemorySaver(), LangSmithClient(), template="")  # "" = default image
+```
+
+The rest of your code stays the same, and rewinding still brings back the files. The only
+difference is where the copies of the sandbox are kept: as LangSmith snapshots instead of SPACE
+sandboxes.
+
+One rule: a thread stays on the provider it started on. A conversation started on SPACE can't be
+continued on LangSmith, and the other way round; if you try, you get a clear
+`ProviderMismatchError`. You can still use both in the same program, with one checkpointer each.
+
+More details and limits: [`src/langchain_space/langsmith/README.md`](src/langchain_space/langsmith/README.md).
+
+
 ## Demos
 
 All three run anywhere: they use simulated sandboxes (`FakeSpaceClient`) unless you pass
@@ -295,6 +325,7 @@ uv run ruff check . && uv run ruff format --check .
 uv run mypy src
 uv run pytest tests/unit tests/consistency     # no SPACE needed; runs on Windows
 uv run pytest -m integration                   # needs SPACE_* environment variables
+uv run pytest -m langsmith                     # needs LANGSMITH_API_KEY
 ```
 
 | Path | What it holds |
@@ -306,6 +337,7 @@ uv run pytest -m integration                   # needs SPACE_* environment varia
 | `src/langchain_space/fork.py` | `fork_and_select` |
 | `src/langchain_space/credentials.py` | Credential rules, network policies, `SecretGuard` |
 | `src/langchain_space/testing/` | `FakeSpaceClient` and the consistency harness graph |
+| `src/langchain_space/langsmith/` | `LangSmithClient`: the same features on LangSmith sandboxes (optional extra) |
 | `tests/consistency/` | The core claim: the bug with a plain backend, the fix with ours |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

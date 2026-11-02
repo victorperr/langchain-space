@@ -20,9 +20,15 @@ full snapshot" route (see API notes). Deep Agents runs stateless shell commands,
 the state that matters.
 
 ## Core design: fork-anchored snapshot binding
-- **Anchor** = a suspended sandbox forked from the live sandbox. Never run again, only forked from.
-  Each checkpoint stores `metadata["space"] = {template, anchor_id}` (`SnapshotBinding`);
+- **Anchor** = an immutable copy of the live sandbox's filesystem, made by the client's
+  `create_anchor` / `restore_anchor` / `delete_anchor` (SPACE: suspended fork; LangSmith: snapshot).
+  Never run, only restored from. `HttpSpaceClient` returns an anchor once its fork exists and
+  suspends it in the background (`suspend_anchors_in_background`, default on); restoring or
+  deleting it waits for that suspend first. A failed background suspend leaves it running.
+  Each checkpoint stores `metadata["space"] = {template, anchor_id, provider}` (`SnapshotBinding`);
   `anchor_id: None` means "pristine template", an explicit state, not a missing snapshot.
+  `provider` is the client's (`"space"`, `"langsmith"`); `get_tuple` raises
+  `ProviderMismatchError` for another provider's checkpoint (`None` = older checkpoint, not checked).
 - **Dirty tracking**: `SpaceSandbox.generation` is bumped by `execute` and `upload_files`, but not by
   the read-only `BaseSandbox` helpers (`ls`, `read`, `grep`, `glob`), which run under a context flag;
   `ThreadRoutedSandbox` forwards those helpers whole to the thread's sandbox. A new anchor
@@ -59,8 +65,11 @@ src/langchain_space/
   credentials.py   # CredentialRule -> network_policy JSON; secret-leak guard
   testing/fake.py  # FakeSpaceClient (in-memory FS per sandbox, fork = deep copy, pluggable exec handler)
   testing/graphs.py # deterministic one-node edit graph + time-travel scenarios (consistency harness)
+  langsmith/       # optional extra: LangSmithClient (SpaceClient over LangSmith sandboxes) + its stub
+                   # (testing.py) + README; the core never imports it
 tests/
   unit/            # fake client only; must pass on Windows
+  langsmith/       # LangSmithClient: stub tests (Windows) + real-LangSmith tests (-m langsmith)
   consistency/     # rewind/fork correctness tests (the core claim)
   integration/     # real SPACE, @pytest.mark.integration; test_standard.py = langchain-tests suite
 benchmarks/        # fork latency, anchor latency, restore correctness after N branches
@@ -73,7 +82,8 @@ SPACE/             # vendored SPACE source (own .git); excluded from git, ruff, 
 - Install: `uv sync`
 - Lint and format: `uv run ruff check . && uv run ruff format .`
 - Types: `uv run mypy src`
-- Unit + consistency tests: `uv run pytest tests/unit tests/consistency`
+- Unit + consistency tests: `uv run pytest tests/unit tests/consistency tests/langsmith`
+- Real LangSmith tests: set `LANGSMITH_API_KEY`, then `uv run pytest -m langsmith`
 - Integration tests (needs SPACE): set `SPACE_API_URL`, `SPACE_DATA_PLANE_URL`, `SPACE_API_TOKEN`, then
   `uv run pytest -m integration`
 - Standard LangChain sandbox suite: `uv run pytest tests/integration/test_standard.py`
@@ -168,6 +178,14 @@ There is no SPACE Python SDK; we call the HTTP API with `httpx` + `httpx-sse`.
   (`HttpSpaceClient.fork` currently waits for `running`.)
 - The fork `timeout` is the child's lifetime (u32 seconds, default 300; only `> 0` is validated). Does it
   still expire a *suspended* anchor? Is there a server-side cap? We request 7 days by default.
+- Opt-in `HttpSpaceClient(idle_timeout=...)` sends `idle_timeout: "<n>s", idle_action: "suspend"`
+  on create (format from `CreateSandboxRequest`, public/api/src/lib.rs). Does a command wake a
+  suspended sandbox, or must we `:wake` it? Forks get no idle policy (the E2B fork body has no
+  such field; `PATCH auto_lifecycle` takes a full `AutoLifecyclePolicy`).
+- Opt-in `live_lifetime` shortens restored sandboxes' and branches' fork `timeout`. If that is a
+  hard kill, a thread unused for longer loses its live sandbox (the registry does not recover).
+- Background anchor suspend: measure the new anchor latency (benchmark "anchor" now times the
+  fork only).
 - Does a fork inherit the source's `network_policy`? (`Snapshotter.restore` re-applies it to be safe.)
 - `seed` has `python3` (BaseSandbox's python3 helper scripts ran on it) but no `python`
   command (integration run 39670929305, SPACE b6ca1b2). Does `files:read` with `length` past
@@ -177,6 +195,22 @@ There is no SPACE Python SDK; we call the HTTP API with `httpx` + `httpx-sse`.
   `xfail(strict=True)` in `tests/integration/test_standard.py`.
 - Confirm the exact `BaseSandbox` / `ExecuteResponse` / `FileUploadResponse` signatures in the installed
   `deepagents` version before writing `backend.py`.
+
+## LangSmith notes
+Verified from the installed `langsmith` 0.14.11 SDK (`langsmith/sandbox/_client.py`, `_sandbox.py`)
+and deepagents' `backends/langsmith.py`. Only `langchain_space/langsmith/client.py` knows them.
+- Sandboxes are addressed by name. `create_sandbox(snapshot=name[:tag] | snapshot_id=uuid,
+  run_config={env_vars, work_dir, user}, idle_ttl_seconds (multiple of 60, default 600, 0 = never),
+  timeout)`; `stop_sandbox` / `start_sandbox`; `delete_sandbox`.
+- `capture_snapshot(sandbox_name, name, run_config=...)` captures the live root filesystem and
+  waits until `ready`; the sandbox's own env vars are not carried, so we bake ours into
+  `run_config`. `delete_snapshot(id)`. Snapshots persist until deleted.
+- `Sandbox.run(command, timeout=, run_config=)` runs through `/bin/bash`; timeout `0` = none;
+  returns separate stdout/stderr; `CommandTimeoutError` on timeout. `read` raises
+  `ResourceNotFoundError(resource_type="file")`; `stat` is HEAD on files only, so our `stat` and
+  `mkdir` are small `sh` scripts.
+- Open: can a snapshot be deleted while a sandbox booted from it runs? (`fork` retries refused
+  deletes in `close()`.) Snapshot capture latency. Not yet run against real LangSmith.
 
 ## Design rules
 - `client.py` is the only module that knows SPACE URLs and JSON. Everything else depends on the

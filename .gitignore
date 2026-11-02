@@ -30,3 +30,4 @@ benchmarks/results/
 
 # Claude Code planning notes (kept local)
 /.claude/plans/
+.claude/references/
