@@ -24,9 +24,13 @@ on:
         description: Samples per latency benchmark
         default: "10"
       record_demo:
-        description: Record examples/rewind_demo.py on real SPACE as a GIF
+        description: Record the rewind demo on real SPACE as GIFs
         type: boolean
-        default: true
+        default: false
+      record_demo_market_competitor:
+        description: Record the market-competitor demo on real SPACE as GIFs
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -354,6 +358,34 @@ jobs:
           "$RUNNER_TEMP/agg" --idle-time-limit 1 --font-size 18 rewind-demo.cast rewind-demo.gif
           ls -lh rewind-demo.cast rewind-demo.gif
 
+      - name: Log in to SPACE for the market demo
+        if: ${{ !cancelled() && inputs.record_demo && steps.tests.outcome != 'skipped' }}
+        continue-on-error: true
+        run: *login
+
+      # Web searches are real with a TAVILY_API_KEY repository secret, empty without one.
+      - name: Record the market-competitor demo on real SPACE
+        if: ${{ !cancelled() && inputs.record_demo_market_competitor && steps.tests.outcome != 'skipped' }}
+        continue-on-error: true
+        env:
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          AGG_VERSION: v1.9.0
+        run: |
+          # The rewind demo step installs these; install them here too in case it failed early.
+          command -v asciinema >/dev/null \
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq asciinema >/dev/null; }
+          if [[ ! -x "$RUNNER_TEMP/agg" ]]; then
+            curl -fsSL -o "$RUNNER_TEMP/agg" \
+              "https://github.com/asciinema/agg/releases/download/$AGG_VERSION/agg-x86_64-unknown-linux-gnu"
+            chmod +x "$RUNNER_TEMP/agg"
+          fi
+          export TERM=xterm-256color
+          script -q -e -c "asciinema rec --overwrite --cols 100 --rows 40 \
+            -c 'uv run --with tavily-python python examples/workflows/market_research.py $SPACE_TEMPLATE' \
+            market-demo.cast" /dev/null
+          "$RUNNER_TEMP/agg" --idle-time-limit 1 --font-size 16 market-demo.cast market-demo.gif
+          ls -lh market-demo.cast market-demo.gif
+
       - name: Fail if a setup step failed
         if: ${{ !cancelled() && (steps.ecw.outcome == 'failure' || steps.template.outcome == 'failure') }}
         run: |
@@ -386,6 +418,8 @@ jobs:
             benchmarks/results/
             rewind-demo.cast
             rewind-demo.gif
+            market-demo.cast
+            market-demo.gif
             ${{ runner.temp }}/space-diagnostics/
           if-no-files-found: ignore
           retention-days: 30
