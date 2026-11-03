@@ -58,8 +58,8 @@ from langchain_space.snapshots import (
 
 __all__ = ["SnapshotGoneError", "SnapshotRetention", "SpaceCheckpointer", "ThreadRoutedSandbox"]
 
+# LangGraph's run-config key for the durability mode; absent means the default, "async".
 _DURABILITY_KEY = "__pregel_durability"
-"""LangGraph's run-config key for the durability mode; absent means the default, 'async'."""
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +129,7 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         super().__init__(serde=inner.serde)
         self._delete_retired_eagerly = delete_retired_eagerly
         self.retention = retention
-        self._undeleted_anchors: list[str] = []
-        """Pruned anchors whose delete failed; retried by the next prune."""
+        self._undeleted_anchors: list[str] = []  # failed deletes, retried by the next prune
         content_check = (backend_kwargs or {}).get("content_check")
         if content_check is not None:
             check_env(content_check, env or {})

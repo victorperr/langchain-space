@@ -88,8 +88,8 @@ def fork_and_select(
         raise ValueError("fork_and_select needs at least one branch")
     client = sandbox.client
     network_policy = sandbox.network_policy
+    # Every fork, recorded as soon as it exists, so cleanup also covers aborted runs.
     forked: list[str] = []
-    """Every fork, recorded as soon as it exists, so cleanup also covers aborted runs."""
 
     def run(index: int, branch: Branch[T]) -> BranchResult[T]:
         try:

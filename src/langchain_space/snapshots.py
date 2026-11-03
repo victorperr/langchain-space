@@ -177,8 +177,7 @@ class Snapshotter:
 @dataclass
 class _Live:
     backend: SpaceSandbox
-    anchor_id: str | None
-    """Anchor holding this sandbox's state as of `anchored_generation`."""
+    anchor_id: str | None  # holds this sandbox's state as of `anchored_generation`
     anchored_generation: int
 
     @property
@@ -188,16 +187,15 @@ class _Live:
 
 @dataclass
 class _Thread:
+    # Root checkpoint the filesystem is at (plus writes by tasks based on it).
     position: str | None = None
-    """Root checkpoint the thread's filesystem is at (plus writes by tasks based on it)."""
     position_binding: SnapshotBinding | None = None
     live: _Live | None = None
+    # Root checkpoints saved by this process.
     bindings: dict[str, SnapshotBinding] = field(default_factory=dict)
-    """Bindings of root checkpoints saved by this process."""
+    # Last failed root bind. LangGraph stops saving a run at the first failed save, so
+    # waiters raise this instead of waiting for a checkpoint that never comes.
     broken: BaseException | None = None
-    """Why the thread's last root binding failed, until a binding succeeds or a checkpoint
-    is loaded. LangGraph saves a run's checkpoints one after another and stops at the first
-    failed save, so tasks waiting for a later checkpoint of that run would wait forever."""
     changed: threading.Condition = field(default_factory=lambda: threading.Condition())
 
 

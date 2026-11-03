@@ -19,8 +19,9 @@ A [LangChain Deep Agents](https://github.com/langchain-ai/deepagents) sandbox ba
 
 LangGraph checkpoints let you rewind, replay and branch an agent's run, but they only capture
 graph state: the files the agent wrote in its sandbox stay wherever the latest run left them.
-With every other sandbox backend, a rewound agent "remembers" step 3 while its sandbox is at
-step 10, and two branches from one checkpoint silently share each other's edits.
+With the sandbox backends Deep Agents ships today, a rewound agent "remembers" step 3 while
+its sandbox is at step 10, and two branches from one checkpoint silently share each other's
+edits. Many sandbox providers can snapshot; none ties those snapshots to checkpoints.
 
 `langchain-space` binds every checkpoint to a snapshot of the sandbox, so graph state and
 sandbox state move together.
@@ -199,9 +200,9 @@ Outside an agent, `SpaceSandbox.create(client, "code-runtime")` is a plain backe
 
 ### On LangSmith sandboxes
 
-Although SPACE is the main target, we propose a design that also works with
+SPACE is the main target, but the same checkpointer also works with
 [LangSmith sandboxes](https://docs.langchain.com/oss/python/integrations/sandboxes/langsmith),
-since you may already use LangSmith to trace your agents. LangSmith sandboxes are hosted by
+which is handy if you already use LangSmith to trace your agents. LangSmith sandboxes are hosted by
 LangChain for you, so there is nothing to install on your machine.
 
 You only change the client, in three steps:
@@ -291,6 +292,18 @@ The credential demo simulates SPACE's gateway. On a real deployment, follow
 `examples/check_credential_injection.py`; `tests/integration/test_space_credentials.py` covers
 the same path in the test suite. Neither has run yet: both need SPACE on AWS.
 
+### A Deep Agents workflow
+
+In [`examples/workflows/`](examples/workflows/WORKFLOWS.md), a lead agent and an analyst
+sub-agent research three companies and write one notes file each, plus a report. Rewinding to
+just before the OpenAI analysis removes `notes/openai.md` and `report.md` from the sandbox too;
+resuming with a new focus writes them again:
+
+![Market research demo on real SPACE: after the rewind, notes/openai.md and report.md are gone; resuming rewrites them with the new focus](docs/market-research-demo.gif)
+
+*Recorded on real SPACE by the integration workflow (run 41601151621). The agents follow a
+fixed script, so it needs no LLM.*
+
 
 ## Benchmarks
 
@@ -301,6 +314,10 @@ the same path in the test suite. Neither has run yet: both need SPACE on AWS.
 - **Restore latency:** fork from an anchor.
 - **Restore correctness after N divergent branches**, both at the SPACE level (hash of every
   file) and through LangGraph (N branches from one checkpoint).
+
+These numbers come from SPACE running under nested virtualization on a 4-vCPU GitHub runner
+(details below), so they are an upper bound: a SPACE fork copies the disk and the child
+cold-boots, and on this VM that boot dominates. Library overhead is about 0.05 ms per operation.
 
 | Operation | Runs | Median (ms) | p90 (ms) |
 |---|---:|---:|---:|
@@ -328,15 +345,19 @@ with a fake whose forks share state, it reports 0/N.
 
 ## Status
 
-Runs on a live SPACE deployment (the integration workflow above, run 39752644201):
-fork-and-select, the time-travel consistency tests and the benchmarks pass there. Of the
+Runs on a live SPACE deployment (the integration workflow above): fork-and-select, the
+time-travel consistency tests and the benchmarks pass there. Of the
 standard `langchain-tests` sandbox suite's 86 tests, 79 pass; the other 7 check the pre-0.7
 deepagents `glob`/`write` contract and are marked as expected failures (see
 `tests/integration/test_standard.py`).
 Credential injection is not verified on real infrastructure: it needs SPACE deployed on AWS,
 with AWS Secrets Manager and AWS Private CA (a local Kind install cannot do it as shipped). See
-[`docs/credential-injection.md`](docs/credential-injection.md). Remaining open questions are
-listed in `CLAUDE.md`.
+[`docs/credential-injection.md`](docs/credential-injection.md). Design notes, the SPACE API
+details this library relies on and the remaining open questions are in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+Built with Claude Code as a pair programmer. The design, the review of every change and the
+debugging on real SPACE are mine.
 
 ## Development
 

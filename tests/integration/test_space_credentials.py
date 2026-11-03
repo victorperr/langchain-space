@@ -1,4 +1,4 @@
-"""Network-layer credential injection on real SPACE (needs AWS; see CLAUDE.md).
+"""Network-layer credential injection on real SPACE (needs AWS; see docs/credential-injection.md).
 
 Required environment, in addition to the SPACE_* variables:
 

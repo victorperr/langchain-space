@@ -19,6 +19,11 @@ searches the web and writes one notes file per company, then the lead writes a r
 
 Then we rewind to just before the OpenAI analysis, to redo it with a different focus.
 
+![Market research demo on real SPACE: after the rewind, notes/openai.md and report.md are gone; resuming rewrites them with the new focus](../../docs/market-research-demo.gif)
+
+*Recorded on real SPACE microVMs by the [integration workflow](../../.github/workflows/integration.yml)
+(run 41601151621). Pauses are capped at 1 s, so the GIF is short; the run itself took about 90 s.*
+
 ### The problem
 
 With a normal sandbox, a rewind only moves the conversation back. The files stay as they are:

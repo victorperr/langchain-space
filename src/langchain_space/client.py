@@ -4,7 +4,7 @@ This is the only module that knows SPACE URLs and JSON shapes. Everything else d
 `SpaceClient` protocol, so tests can swap in `langchain_space.testing.FakeSpaceClient`.
 
 API facts used here are verified against the SPACE source; see the "SPACE API notes" section
-of CLAUDE.md for the references.
+of docs/ARCHITECTURE.md for the references.
 """
 
 from __future__ import annotations
