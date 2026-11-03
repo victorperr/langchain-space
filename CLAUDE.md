@@ -47,6 +47,16 @@ the state that matters.
 - **Restore** = fork a new sandbox from the anchor, lazily on first use. The previous live sandbox is
   retired (never mutated); `close()` / `delete_retired()` delete retired ones,
   `delete_unreferenced_anchors()` deletes anchors no stored checkpoint references.
+- **Retention** (`SnapshotRetention(keep_last, keep)`, opt-in via `retention=` or
+  `prune_snapshots()`): per thread, keep the newest `keep_last` distinct anchors plus those of
+  checkpoints `keep` accepts; delete an anchor only if no kept checkpoint of *any* thread uses it
+  (copied threads share anchors). Checkpoints stay; rewinding to one raises `SnapshotGoneError`
+  (also raised when a restore finds the anchor `not_found`). `claim_for_pruning` marks before it
+  checks `anchors_in_use`, so a concurrent rewind either keeps the anchor or sees the mark.
+- **Failed background saves**: LangGraph saves a run's checkpoints one after another and stops at
+  the first failure, so tasks would wait for a checkpoint that never comes. A failed root `bind`
+  marks the thread `broken`; waiters raise that error. Cleared by the next successful bind and by
+  any `get_tuple` (every run loads a checkpoint before saving one).
 - **Known limitation**: a step that fails mid-way leaves its partial sandbox writes for its retry
   (keeping them is right for parallel peers that succeeded; exact fidelity needs per-task snapshots).
 - **Fork-and-select**: anchor the current state, issue N concurrent fork requests, run each branch, run

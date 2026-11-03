@@ -175,6 +175,24 @@ def test_write_before_commit(fake: FakeSpaceClient, saver: SpaceCheckpointer) ->
     assert file_in(fake, newest_anchor) == b"v1"
 
 
+def test_failed_background_snapshot_fails_the_run_instead_of_hanging(
+    fake: FakeSpaceClient, saver: SpaceCheckpointer
+) -> None:
+    saver.registry._wait_timeout = 5  # a regression waits this long, then times out
+    graph = build_edit_graph(saver.backend, saver)
+    graph.invoke({"target": "v1"}, thread("t"))
+    saver.sandbox("t").upload_files([(EDIT_FILE, b"changed outside a run")])
+
+    # The run's first checkpoint must snapshot that change; with durability="async" its
+    # save runs in the background while `edit` waits for a later checkpoint.
+    fake.fork_error = SpaceError("capture failed", code="internal")
+    with pytest.raises(SpaceError, match="capture failed"):
+        graph.invoke({"target": "v2"}, thread("t"), durability="async")
+
+    fake.fork_error = None  # the failure does not leak into the next run
+    assert graph.invoke({"target": "v3"}, thread("t"))["observed"][-1] == "changed outside a run"
+
+
 def test_rewind_forks_new_sandbox_and_leaves_old_one_untouched(fake: FakeSpaceClient) -> None:
     # Keep retired sandboxes (deleted eagerly by default) so the old one can be inspected.
     saver = SpaceCheckpointer(

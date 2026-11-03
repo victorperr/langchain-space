@@ -1,7 +1,7 @@
 """LangChain Deep Agents sandbox backend for SPACE, with snapshot-consistent time travel."""
 
 from langchain_space.backend import SpaceSandbox
-from langchain_space.checkpointer import SpaceCheckpointer, ThreadRoutedSandbox
+from langchain_space.checkpointer import SnapshotRetention, SpaceCheckpointer, ThreadRoutedSandbox
 from langchain_space.client import CommandResult, HttpSpaceClient, SpaceClient, SpaceError
 from langchain_space.credentials import (
     CredentialRule,
@@ -16,6 +16,7 @@ from langchain_space.snapshots import (
     MissingSnapshotError,
     ProviderMismatchError,
     SnapshotBinding,
+    SnapshotGoneError,
 )
 
 __all__ = [
@@ -29,6 +30,8 @@ __all__ = [
     "SecretGuard",
     "SecretLeakError",
     "SnapshotBinding",
+    "SnapshotGoneError",
+    "SnapshotRetention",
     "SpaceCheckpointer",
     "SpaceClient",
     "SpaceError",

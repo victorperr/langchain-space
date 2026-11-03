@@ -23,12 +23,12 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_space.backend import SpaceSandbox
-from langchain_space.client import SpaceClient
+from langchain_space.client import SpaceClient, SpaceError
 
 SPACE_METADATA_KEY = "space"
 """Key under which a checkpoint's metadata stores its `SnapshotBinding`."""
@@ -41,6 +41,13 @@ BindingLoader = Callable[[str, str], "SnapshotBinding | None"]
 
 class MissingSnapshotError(LookupError):
     """A checkpoint has no SPACE snapshot binding, so its sandbox state cannot be restored."""
+
+
+class SnapshotGoneError(MissingSnapshotError):
+    """A checkpoint's snapshot no longer exists, so its sandbox state cannot be restored.
+
+    Snapshot retention pruned it, or it was deleted or expired. Rewind to a newer checkpoint.
+    """
 
 
 class ProviderMismatchError(ValueError):
@@ -149,13 +156,19 @@ class Snapshotter:
 
         Raises:
             ProviderMismatchError: `binding` was saved with another provider.
+            SnapshotGoneError: the anchor no longer exists.
         """
         binding.check_provider(self.provider)
         if binding.anchor_id is None:
             return self.client.create_sandbox(
                 binding.template, env=self._env, network_policy=self._network_policy
             )
-        sandbox_id = self.client.restore_anchor(binding.anchor_id)
+        try:
+            sandbox_id = self.client.restore_anchor(binding.anchor_id)
+        except SpaceError as error:
+            if error.code != "not_found":
+                raise
+            raise _gone(binding.anchor_id) from error
         if self._network_policy is not None:
             self.client.set_network_policy(sandbox_id, self._network_policy)
         return sandbox_id
@@ -181,6 +194,10 @@ class _Thread:
     live: _Live | None = None
     bindings: dict[str, SnapshotBinding] = field(default_factory=dict)
     """Bindings of root checkpoints saved by this process."""
+    broken: BaseException | None = None
+    """Why the thread's last root binding failed, until a binding succeeds or a checkpoint
+    is loaded. LangGraph saves a run's checkpoints one after another and stops at the first
+    failed save, so tasks waiting for a later checkpoint of that run would wait forever."""
     changed: threading.Condition = field(default_factory=lambda: threading.Condition())
 
 
@@ -213,7 +230,12 @@ class SandboxRegistry:
         self._threads: dict[str, _Thread] = {}
         self._lock = threading.Lock()
         self.anchors: list[str] = []
-        """Every anchor this registry created, oldest first."""
+        """Anchors this registry created and has not pruned, oldest first."""
+        self.anchors_created = 0
+        """How many anchors this registry ever created (it only grows)."""
+        self.pruned: set[str] = set()
+        """Anchors claimed for deletion by snapshot retention; no thread may move onto them."""
+        self._prune_lock = threading.Lock()
         self.retired: list[str] = []
         """Live sandboxes no thread uses anymore (safe to delete; anchors are separate)."""
 
@@ -228,8 +250,10 @@ class SandboxRegistry:
     ) -> SnapshotBinding:
         """Decide the binding of a checkpoint about to be saved (call before saving it).
 
-        Raises whatever snapshotting raises; nothing is recorded in that case, so the
-        caller must not save the checkpoint (write-before-commit).
+        Raises whatever snapshotting raises; the caller must then not save the checkpoint
+        (write-before-commit). Tasks of the thread that wait for a checkpoint then get the
+        same error instead of waiting for a save that never comes (with
+        `durability="async"`, saves run in the background while tasks wait).
         """
         slot = self._thread(thread_id)
         with slot.changed:
@@ -237,9 +261,15 @@ class SandboxRegistry:
                 # Subgraph checkpoints share the thread's sandbox, which follows the root
                 # graph's lineage; record the current state without moving the thread.
                 return self._current_binding(slot)
-            if slot.position != parent_id:
-                self._move_to(slot, thread_id, parent_id)
-            binding = self._current_binding(slot)
+            try:
+                if slot.position != parent_id:
+                    self._move_to(slot, thread_id, parent_id)
+                binding = self._current_binding(slot)
+            except BaseException as error:
+                slot.broken = error
+                slot.changed.notify_all()
+                raise
+            slot.broken = None
             slot.bindings[checkpoint_id] = binding
             slot.position, slot.position_binding = checkpoint_id, binding
             slot.changed.notify_all()
@@ -288,6 +318,8 @@ class SandboxRegistry:
     def _wait_known(self, slot: _Thread, thread_id: str, checkpoint_id: str) -> None:
         deadline = time.monotonic() + self._wait_timeout
         while self._lookup(slot, thread_id, checkpoint_id) is None:
+            if slot.broken is not None:
+                raise slot.broken
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(
@@ -308,6 +340,8 @@ class SandboxRegistry:
                 )
             # Fail before retiring anything: the thread stays where it is.
             found.check_provider(self.snapshotter.provider)
+            if found.anchor_id is not None and found.anchor_id in self.pruned:
+                raise _gone(found.anchor_id)
             binding = found
         live = slot.live
         if live is not None and not (live.clean and live.anchor_id == binding.anchor_id):
@@ -329,7 +363,9 @@ class SandboxRegistry:
             generation = live.backend.generation
             live.anchor_id = self.snapshotter.anchor(live.backend.id)
             live.anchored_generation = generation
-            self.anchors.append(live.anchor_id)
+            with self._lock:
+                self.anchors.append(live.anchor_id)
+                self.anchors_created += 1
         return self._binding(live.anchor_id)
 
     def _materialize(self, slot: _Thread) -> SpaceSandbox:
@@ -375,6 +411,37 @@ class SandboxRegistry:
                     used.add(slot.position_binding.anchor_id)
         return used
 
+    def loaded(self, thread_id: str) -> None:
+        """A checkpoint of the thread was loaded: forget the last failed binding.
+
+        Every run loads its checkpoint before saving anything, so a failure from an
+        earlier run never fails the tasks of a new one.
+        """
+        with self._lock:
+            slot = self._threads.get(thread_id)
+        if slot is not None:
+            with slot.changed:
+                slot.broken = None
+
+    def claim_for_pruning(self, candidates: Iterable[str]) -> list[str]:
+        """Mark anchors as pruned and return those that are now safe to delete.
+
+        Anchors a thread uses (see `anchors_in_use`) are left alone. Once an anchor is
+        claimed, a thread trying to move onto it gets `SnapshotGoneError`. Marking before
+        checking closes the race with a rewind: either the rewind got there first (the
+        anchor is in use and is kept) or it sees the mark and fails.
+        """
+        with self._prune_lock:
+            marked = [a for a in dict.fromkeys(candidates) if a not in self.pruned]
+            self.pruned.update(marked)
+            in_use = self.anchors_in_use()
+            claimed = [a for a in marked if a not in in_use]
+            self.pruned.difference_update(a for a in marked if a in in_use)
+        gone = set(claimed)
+        with self._lock:
+            self.anchors = [a for a in self.anchors if a not in gone]
+        return claimed
+
     def live_sandbox_id(self, thread_id: str) -> str | None:
         """The thread's materialized sandbox id, if any."""
         live = self._thread(thread_id).live
@@ -415,3 +482,10 @@ class SandboxRegistry:
             if slot.live is not None:
                 self.retired.append(slot.live.backend.id)
         self.delete_retired()
+
+
+def _gone(anchor_id: str) -> SnapshotGoneError:
+    return SnapshotGoneError(
+        f"snapshot {anchor_id} of this checkpoint no longer exists (pruned by snapshot "
+        "retention, deleted or expired); rewind to a newer checkpoint"
+    )

@@ -59,7 +59,8 @@ checkpointer, registry and fork-and-select code is shared, not copied.
 - **Snapshot cost.** A snapshot copies the sandbox's whole root filesystem, which is likely slower
   than a SPACE fork. One is taken only when the sandbox changed since the last one.
 - **Snapshots last until deleted.** They are resources in your LangSmith account: delete them
-  (`delete_anchor`, or `saver.delete_unreferenced_anchors()`) when their checkpoints are gone.
+  (`delete_anchor`, or `saver.delete_unreferenced_anchors()`) when their checkpoints are gone,
+  or cap them per thread with `SpaceCheckpointer(retention=SnapshotRetention(keep_last=N))`.
 - **Idle stop.** LangSmith stops idle sandboxes; `LangSmithClient(idle_ttl_seconds=...)` defaults
   to one hour instead of LangSmith's ten minutes.
 - **SPACE-only features.** Network policies and credential references raise

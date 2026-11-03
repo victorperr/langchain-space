@@ -83,12 +83,33 @@ each task knows the checkpoint it runs on top of. When checkpoint X with parent 
   is immediately suspended and never run again.
 - Otherwise the thread jumped (rewind, replay, `update_state`, fork), and X binds to P's
   snapshot. The next tool call forks a fresh sandbox from it. The previous sandbox is retired,
-  never mutated. Retired sandboxes keep running until `saver.close()`; pass
-  `delete_retired_eagerly=True` to delete them once the next checkpoint is saved (useful for
-  long-lived servers).
+  never mutated, and deleted once the next checkpoint is saved (`delete_retired_eagerly=False`
+  keeps it running until `saver.close()`).
 
 The snapshot is taken before the checkpoint is written. If it fails, the checkpoint is not
 saved.
+
+**Keeping snapshots bounded.** By default every checkpoint stays restorable, so an agent that
+changes files at every step keeps one snapshot per step. Cap them per thread:
+
+```python
+from langchain_space import SnapshotRetention
+
+saver = SpaceCheckpointer(
+    InMemorySaver(),
+    client,
+    template="code-runtime",
+    retention=SnapshotRetention(
+        keep_last=20,  # the 20 newest sandbox states
+        keep=lambda c: c.metadata.get("keep") is True,  # plus runs started with this metadata
+    ),
+)
+```
+
+Older snapshots are deleted after each new one; their checkpoints stay in the history.
+Rewinding to one raises `SnapshotGoneError` instead of restoring the wrong files. The
+snapshot a thread is on, and any snapshot a kept checkpoint of another thread uses, is never
+deleted. `saver.prune_snapshots(SnapshotRetention(...))` does the same on demand.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

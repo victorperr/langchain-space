@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+import logging
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from deepagents.backends.protocol import (
@@ -50,11 +52,41 @@ from langchain_space.snapshots import (
     MissingSnapshotError,
     SandboxRegistry,
     SnapshotBinding,
+    SnapshotGoneError,
     Snapshotter,
 )
 
+__all__ = ["SnapshotGoneError", "SnapshotRetention", "SpaceCheckpointer", "ThreadRoutedSandbox"]
+
 _DURABILITY_KEY = "__pregel_durability"
 """LangGraph's run-config key for the durability mode; absent means the default, 'async'."""
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SnapshotRetention:
+    """Which snapshots to keep. The others are deleted; their checkpoints stay in history.
+
+    Rewinding to a checkpoint whose snapshot was deleted raises `SnapshotGoneError`.
+
+    Args:
+        keep_last: Per thread, keep the snapshots of its newest checkpoints until `keep_last`
+            distinct snapshots are kept. Checkpoints that did not change the sandbox share
+            their parent's snapshot, so this counts sandbox states, not steps.
+        keep: Also keep the snapshot of every checkpoint for which this returns True, e.g.
+            `lambda c: c.metadata.get("keep") is True` for runs started with
+            `config={"metadata": {"keep": True}, ...}`.
+
+    The snapshot a thread is on, or is moving onto, is always kept.
+    """
+
+    keep_last: int
+    keep: Callable[[CheckpointTuple], bool] | None = None
+
+    def __post_init__(self) -> None:
+        if self.keep_last < 1:
+            raise ValueError("keep_last must be >= 1")
 
 
 class SpaceCheckpointer(BaseCheckpointSaver[Any]):
@@ -75,6 +107,10 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         delete_retired_eagerly: Delete sandboxes left behind by a rewind or fork as soon
             as the next checkpoint is saved (default), instead of keeping them running until
             `close()`. Turn it off only if several runs may use the same thread at once.
+        retention: Delete old snapshots automatically: after each save that took a new
+            snapshot, `prune_snapshots` runs with this policy. Off by default (every
+            checkpoint stays restorable). Each prune lists all stored checkpoints once;
+            with a very large store, call `prune_snapshots` on a schedule instead.
     """
 
     def __init__(
@@ -88,9 +124,13 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         anchor_lifetime_seconds: int | None = None,
         backend_kwargs: Mapping[str, Any] | None = None,
         delete_retired_eagerly: bool = True,
+        retention: SnapshotRetention | None = None,
     ) -> None:
         super().__init__(serde=inner.serde)
         self._delete_retired_eagerly = delete_retired_eagerly
+        self.retention = retention
+        self._undeleted_anchors: list[str] = []
+        """Pruned anchors whose delete failed; retried by the next prune."""
         content_check = (backend_kwargs or {}).get("content_check")
         if content_check is not None:
             check_env(content_check, env or {})
@@ -132,13 +172,22 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         )
         return SnapshotBinding.from_metadata(stored.metadata) if stored is not None else None
 
-    def _after_save(self) -> None:
+    def _after_save(self, anchors_before: int) -> None:
         if self._delete_retired_eagerly and self.registry.retired:
             # Best effort: a failed delete stays in `retired` and is retried next time.
             with contextlib.suppress(Exception):
                 self.registry.delete_retired()
+        if self.retention is not None and self.registry.anchors_created > anchors_before:
+            try:
+                self.prune_snapshots()
+            except Exception:
+                # Best effort: failed deletes are retried by the next prune.
+                logger.warning("pruning snapshots failed", exc_info=True)
 
-    def _validate(self, checkpoint_tuple: CheckpointTuple | None) -> None:
+    def _validate(self, config: RunnableConfig, checkpoint_tuple: CheckpointTuple | None) -> None:
+        thread_id = config.get("configurable", {}).get("thread_id")
+        if thread_id is not None:
+            self.registry.loaded(str(thread_id))
         if checkpoint_tuple is None:
             return
         if checkpoint_tuple.config["configurable"].get("checkpoint_ns", ROOT_NS) == ROOT_NS:
@@ -176,6 +225,66 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         self.registry.anchors = [a for a in self.registry.anchors if a not in gone]
         return deleted
 
+    def prune_snapshots(self, retention: SnapshotRetention | None = None) -> list[str]:
+        """Delete the snapshots `retention` (default: the checkpointer's) does not keep.
+
+        Checkpoints stay in history; rewinding to one whose snapshot was deleted raises
+        `SnapshotGoneError`. A snapshot is deleted only if no kept checkpoint of any thread
+        references it (copied threads share snapshots) and no thread is on it.
+
+        Safe while runs are active in this process. Another process restoring the same
+        checkpoint at the same moment may find its snapshot gone and get the same error.
+
+        Returns the deleted anchor ids. A failed delete is retried by the next call; the
+        first error is raised after trying all of them.
+        """
+        policy = retention or self.retention
+        if policy is None:
+            raise ValueError("pass a SnapshotRetention, or set `retention` on the checkpointer")
+        referenced: set[str] = set()
+        kept: set[str] = set()
+        by_thread: dict[str, list[tuple[str, str]]] = {}
+        for stored in self.inner.list(None):
+            try:
+                anchor_id = SnapshotBinding.from_metadata(stored.metadata).anchor_id
+            except MissingSnapshotError:
+                continue
+            if anchor_id is None:
+                continue
+            referenced.add(anchor_id)
+            if policy.keep is not None and policy.keep(stored):
+                kept.add(anchor_id)
+                continue
+            configurable = stored.config["configurable"]
+            entries = by_thread.setdefault(configurable["thread_id"], [])
+            entries.append((configurable["checkpoint_id"], anchor_id))
+        for entries in by_thread.values():
+            entries.sort(reverse=True)  # newest first: LangGraph checkpoint ids sort by time
+            newest: list[str] = []
+            for _, anchor_id in entries:
+                if anchor_id not in newest:
+                    newest.append(anchor_id)
+                    if len(newest) == policy.keep_last:
+                        break
+            kept.update(newest)
+        candidates = sorted(referenced - kept - self.registry.pruned)
+        to_delete = self._undeleted_anchors + self.registry.claim_for_pruning(candidates)
+        deleted: list[str] = []
+        failed: list[str] = []
+        first_error: Exception | None = None
+        for anchor_id in to_delete:
+            try:
+                self.client.delete_anchor(anchor_id)
+            except Exception as error:
+                failed.append(anchor_id)
+                first_error = first_error or error
+            else:
+                deleted.append(anchor_id)
+        self._undeleted_anchors = failed
+        if first_error is not None:
+            raise first_error
+        return deleted
+
     def close(self) -> None:
         """Delete every live sandbox. Anchors stay, so stored checkpoints remain restorable."""
         self.registry.close()
@@ -197,7 +306,7 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         them. The thread moves when a run saves or works on top of another checkpoint.
         """
         checkpoint_tuple = self.inner.get_tuple(config)
-        self._validate(checkpoint_tuple)
+        self._validate(config, checkpoint_tuple)
         return checkpoint_tuple
 
     def list(
@@ -219,9 +328,10 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
         """Snapshot first, then save the checkpoint with its snapshot (write-before-commit)."""
+        anchors_before = self.registry.anchors_created
         bound = {**metadata, **self._bind(config, checkpoint)}
         saved = self.inner.put(config, checkpoint, bound, new_versions)  # type: ignore[arg-type]
-        self._after_save()
+        self._after_save(anchors_before)
         return saved
 
     def put_writes(
@@ -266,7 +376,7 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Async `get_tuple`."""
         checkpoint_tuple = await self.inner.aget_tuple(config)
-        self._validate(checkpoint_tuple)
+        self._validate(config, checkpoint_tuple)
         return checkpoint_tuple
 
     async def alist(
@@ -289,10 +399,11 @@ class SpaceCheckpointer(BaseCheckpointSaver[Any]):
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
         """Async `put`. The snapshot (blocking SPACE calls) runs in a worker thread."""
+        anchors_before = self.registry.anchors_created
         binding = await asyncio.to_thread(self._bind, config, checkpoint)
         bound = {**metadata, **binding}
         saved = await self.inner.aput(config, checkpoint, bound, new_versions)  # type: ignore[arg-type]
-        await asyncio.to_thread(self._after_save)
+        await asyncio.to_thread(self._after_save, anchors_before)
         return saved
 
     async def aput_writes(
