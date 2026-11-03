@@ -10,6 +10,7 @@ of CLAUDE.md for the references.
 from __future__ import annotations
 
 import base64
+import binascii
 import contextlib
 import json
 import logging
@@ -44,6 +45,28 @@ _WRITE_BATCH_MAX_ENTRIES = 256
 _WRITE_BATCH_MAX_BYTES = 3 * MIB
 """Data plus path bytes per `files:write_batch` (`MAX_FILE_WRITE_BATCH_BYTES`,
 SPACE api/src/routes/public/files.rs)."""
+
+_READ_FILES_SCRIPT = """exec 2>/dev/null
+budget=$1
+shift
+for p do
+  if [ -d "$p" ]; then echo D
+  elif [ ! -e "$p" ]; then echo N
+  elif [ ! -r "$p" ]; then echo P
+  else
+    n=$(wc -c < "$p" | tr -d ' ')
+    case $n in ''|*[!0-9]*) echo P; continue;; esac
+    if [ "$n" -gt "$budget" ]; then echo "B $n"
+    else budget=$((budget - n)); echo "F $n"; base64 < "$p" | tr -d '\\n'; echo
+    fi
+  fi
+done"""
+"""Prints one record per path: `D` (directory), `N` (missing), `P` (unreadable), `B <size>`
+(over the output budget: read it with `files:read`) or `F <size>` and a base64 line.
+Base64 keeps binary files intact through the command's UTF-8 output stream."""
+_READ_FILES_MAX_PATHS = 256
+_READ_FILES_MAX_PATH_BYTES = 64 * 1024
+"""Path bytes per `read_files` command, far below Linux's argument size limit."""
 
 
 @dataclass(frozen=True)
@@ -166,6 +189,14 @@ class SpaceClient(Protocol):
         """
         ...
 
+    def read_files(self, sandbox_id: str, paths: Sequence[str]) -> list[bytes | SpaceError]:
+        """Return the contents of each file, or the error for that file, in order.
+
+        A directory is a `SpaceError` with code `is_directory`; a missing path is one with
+        code `not_found` (`is_path_not_found`).
+        """
+        ...
+
     def stat(self, sandbox_id: str, path: str) -> FileStat:
         """Return metadata for `path`; raises `SpaceError` with code `not_found` if missing."""
         ...
@@ -242,6 +273,23 @@ def write_files_one_by_one(
             results.append(error)
         else:
             results.append(None)
+    return results
+
+
+def read_files_one_by_one(
+    client: SpaceClient, sandbox_id: str, paths: Sequence[str]
+) -> list[bytes | SpaceError]:
+    """`SpaceClient.read_files` built from `stat` and `read_file` (two calls per file)."""
+    results: list[bytes | SpaceError] = []
+    for path in paths:
+        try:
+            stat = client.stat(sandbox_id, path)
+            if stat.file_type == "directory":
+                results.append(SpaceError(f"{path} is a directory", code="is_directory"))
+                continue
+            results.append(client.read_file(sandbox_id, path, size=stat.size_bytes))
+        except SpaceError as error:
+            results.append(error)
     return results
 
 
@@ -716,6 +764,63 @@ class HttpSpaceClient:
             offset += len(part)
         return b"".join(parts)
 
+    def read_files(self, sandbox_id: str, paths: Sequence[str]) -> list[bytes | SpaceError]:
+        """See `SpaceClient.read_files`.
+
+        Several absolute paths are read by one shell command that prints each file in
+        base64, up to about three quarters of `max_output_bytes` in total. Larger files are
+        then read with `files:read`. Files the command could not return (unexpected or cut
+        output, no shell) are read one by one, so each still gets its own result.
+        """
+        results: list[bytes | SpaceError | None] = [None] * len(paths)
+        group: list[int] = []
+        group_bytes = 0
+        for index, path in enumerate(paths):
+            if not path.startswith("/"):
+                continue  # read one by one below, resolved like the file routes resolve it
+            size = len(path.encode())
+            if group and (
+                len(group) == _READ_FILES_MAX_PATHS
+                or group_bytes + size > _READ_FILES_MAX_PATH_BYTES
+            ):
+                self._read_group(sandbox_id, paths, group, results)
+                group, group_bytes = [], 0
+            group.append(index)
+            group_bytes += size
+        if len(group) > 1:  # one file costs two requests either way; skip the command
+            self._read_group(sandbox_id, paths, group, results)
+        rest = [index for index, result in enumerate(results) if result is None]
+        for index, result in zip(
+            rest, read_files_one_by_one(self, sandbox_id, [paths[i] for i in rest]), strict=True
+        ):
+            results[index] = result
+        return [result for result in results if result is not None]
+
+    def _read_group(
+        self,
+        sandbox_id: str,
+        paths: Sequence[str],
+        group: list[int],
+        results: list[bytes | SpaceError | None],
+    ) -> None:
+        """Fill `results` for the paths at `group` that one command could read."""
+        budget = max(self._max_output_bytes * 3 // 4 - 64 * 1024, 0)
+        argv = ["sh", "-c", _READ_FILES_SCRIPT, "sh", str(budget), *(paths[i] for i in group)]
+        try:
+            output = self.run_command(sandbox_id, argv, timeout=300).output
+        except SpaceError as error:
+            logger.debug("reading %d files in one command failed (%s)", len(group), error)
+            return
+        records = _parse_read_files(output, [paths[i] for i in group])
+        for index, record in zip(group, records, strict=True):
+            if isinstance(record, int):  # over the budget: its size is known, read it directly
+                try:
+                    results[index] = self.read_file(sandbox_id, paths[index], size=record)
+                except SpaceError as error:
+                    results[index] = error
+            else:
+                results[index] = record
+
     def stat(self, sandbox_id: str, path: str) -> FileStat:
         """See `SpaceClient.stat`."""
         response = self._json(
@@ -946,6 +1051,48 @@ _CODE_BY_STATUS = {
     429: "rate_limited",
     503: "service_unavailable",
 }
+
+
+def _parse_read_files(output: str, paths: Sequence[str]) -> list[bytes | SpaceError | int | None]:
+    """Decode `_READ_FILES_SCRIPT`'s records, one per path.
+
+    An int is the size of a file the command left out; None means the output stopped
+    making sense there (e.g. it was cut), so that path and the ones after it are unknown.
+    """
+    lines = output.split("\n")
+    records: list[bytes | SpaceError | int | None] = []
+    position = 0
+    for path in paths:
+        if position >= len(lines):
+            break
+        kind, _, size = lines[position].partition(" ")
+        position += 1
+        if kind == "D":
+            records.append(SpaceError(f"{path} is a directory", code="is_directory"))
+        elif kind == "N":
+            records.append(
+                SpaceError(
+                    f"{path}: no such file or directory",
+                    code="not_found",
+                    details={"resource": "path"},
+                )
+            )
+        elif kind == "P":
+            records.append(SpaceError(f"{path}: permission denied", code="forbidden"))
+        elif kind == "B" and size.isdigit():
+            records.append(int(size))
+        elif kind == "F" and size.isdigit() and position < len(lines):
+            try:
+                data = base64.b64decode(lines[position], validate=True)
+            except binascii.Error:
+                break
+            position += 1
+            if len(data) != int(size):
+                break
+            records.append(data)
+        else:
+            break
+    return records + [None] * (len(paths) - len(records))
 
 
 def _retry_after(response: httpx.Response) -> float | None:

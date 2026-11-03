@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from langchain_space.client import CommandResult, FileStat, SpaceError
+from langchain_space.client import CommandResult, FileStat, SpaceError, read_files_one_by_one
 
 SandboxState = Literal["running", "suspended", "deleted"]
 HOME = "/home/user"
@@ -241,6 +241,11 @@ class FakeSpaceClient:
         if normalized not in sandbox.files:
             raise _path_not_found(path)
         return sandbox.files[normalized]
+
+    def read_files(self, sandbox_id: str, paths: Sequence[str]) -> list[bytes | SpaceError]:
+        """See `SpaceClient.read_files`. Recorded as one call, then read file by file."""
+        self._record("read_files", sandbox_id=sandbox_id, paths=list(paths))
+        return read_files_one_by_one(self, sandbox_id, paths)
 
     def stat(self, sandbox_id: str, path: str) -> FileStat:
         """See `SpaceClient.stat`."""

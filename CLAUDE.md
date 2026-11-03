@@ -147,6 +147,9 @@ There is no SPACE Python SDK; we call the HTTP API with `httpx` + `httpx-sse`.
   writes entries in order and stops at the first failure without naming it; earlier entries stay
   written (`api/src/routes/public/files.rs`, `spaced/guest/execution/src/filesystem/write.rs`, same
   at b6ca1b2). `HttpSpaceClient.write_files` batches and rewrites a failed batch one file at a time.
+  There is no batch read route: `HttpSpaceClient.read_files` reads several files with one `sh`
+  command printing base64 records (`_READ_FILES_SCRIPT`, needs `wc`, `tr`, `base64`), sends files
+  over ~3/4 of `max_output_bytes` to `files:read`, and reads anything it could not parse one by one.
   `files:read {path, offset, length (1..16 MiB)}` -> raw bytes, `files:stat`, `files:list`,
   `files:mkdir {path, parents}`, `files:remove`, `files:rename`. Missing file = 404 with detail
   `resource=path` (a 404 without it = sandbox not found). Relative paths resolve under `/home/user`.

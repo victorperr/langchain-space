@@ -91,16 +91,25 @@ jobs:
             echo "- SPACE: \`$(git -C SPACE rev-parse HEAD)\`"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Runners vary: some have a 145 GB root disk plus a separate /mnt, others a 72 GB root disk
+      # with /mnt on it (run 41534657270 ran out of space there on a Rust cache miss).
       - name: Free disk space
         run: |
           df -h / /mnt
+          # Preinstalled toolchains nothing here uses (SPACE builds in containers; uv brings Python).
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift \
+            /usr/share/miniconda /usr/lib/jvm /opt/az /opt/microsoft /opt/google /opt/pipx \
+            /usr/local/share/powershell /usr/local/share/chromium /usr/local/julia*
+          sudo apt-get clean
           docker system prune -af >/dev/null
-          # Kind nodes keep their containerd image stores here; /mnt is a separate disk.
+          # Kind nodes keep their containerd image stores here (a separate disk on most runners).
           sudo install -d -m 0755 -o "$USER" -g "$(id -gn)" /mnt/kind-data
           echo "SPACE_KIND_DATA_ROOT=/mnt/kind-data" >>"$GITHUB_ENV"
           df -h / /mnt
+          if [[ "$(df --output=source / | tail -1)" == "$(df --output=source /mnt | tail -1)" ]]; then
+            echo "::notice::/mnt is on the root disk on this runner: Kind images share its space"
+          fi
 
       - name: Enable KVM access
         run: |
@@ -159,13 +168,75 @@ jobs:
           path: ${{ runner.temp }}/space-rust-image.tar.zst
           key: space-rust-artifacts-${{ steps.machine.outputs.space_sha }}
 
+      # Fail fast instead of 30+ minutes in. A cache miss also compiles SPACE's Rust workspace;
+      # the thresholds are estimates (run 41534657270 failed with 41 GB free on a miss, before
+      # the compile files were deleted below).
+      - name: Check free disk space
+        env:
+          CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: |
+          free_gb=$(( $(df --output=avail -k / | tail -1) / 1024 / 1024 ))
+          echo "Free on /: ${free_gb} GB (Rust cache hit: ${CACHE_HIT:-false})"
+          if (( free_gb < 20 )); then
+            echo "::error::Only ${free_gb} GB free on /: too little to deploy SPACE. Re-run (runners vary) or use a larger runner."
+            exit 1
+          fi
+          if [[ "$CACHE_HIT" != "true" ]] && (( free_gb < 50 )); then
+            echo "::warning::Only ${free_gb} GB free and no cached Rust image: SPACE compiles from scratch, which may not fit. If it fails, re-run: this run saves the compiled image to the cache."
+          fi
+
       - name: Use the cached Rust image
         if: steps.rust-cache.outputs.cache-hit == 'true'
-        env:
-          SPACE_SHA: ${{ steps.machine.outputs.space_sha }}
         run: |
           zstd -dcq "$RUNNER_TEMP/space-rust-image.tar.zst" | docker load
           rm -f "$RUNNER_TEMP/space-rust-image.tar.zst"
+
+      # On a cache miss, compile here rather than inside bootstrap.sh, then delete what the
+      # compile leaves behind (cargo target dir, cargo home, source copy: ~20 GB on a cold
+      # build) before bootstrap loads images into the Kind nodes.
+      - name: Compile SPACE's Rust image
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        working-directory: SPACE
+        run: |
+          time bash infra/space/kind/scripts/build-rust-artifacts.sh
+          df -h /
+          state="${SPACE_TILT_STATE_DIR:-$HOME/.space-devbox/kind}"
+          # Written from inside the build container, so possibly owned by root.
+          sudo rm -rf "$state/rust-target" "$state/cargo-home" "$state/rust-src" "$state/rust-artifacts"
+          docker builder prune -af >/dev/null
+          df -h /
+
+      # Saved right after the compile, before the deploy can fill the disk, so a re-run of a
+      # failed run skips the compile.
+      - name: Export the compiled SPACE Rust image
+        id: rust-export
+        if: ${{ !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        run: |
+          if docker image inspect space-rust-build-kind:local >/dev/null 2>&1; then
+            docker save space-rust-build-kind:local | zstd -T0 -3 -q -o "$RUNNER_TEMP/space-rust-image.tar.zst"
+            ls -lh "$RUNNER_TEMP/space-rust-image.tar.zst"
+            echo "ready=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "::warning::No compiled Rust image to cache"
+          fi
+
+      - name: Save the compiled SPACE Rust image for later runs
+        if: ${{ !cancelled() && steps.rust-export.outputs.ready == 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/space-rust-image.tar.zst
+          key: space-rust-artifacts-${{ steps.machine.outputs.space_sha }}
+
+      - name: Delete the exported Rust image
+        if: ${{ !cancelled() && steps.rust-export.outputs.ready == 'true' }}
+        run: rm -f "$RUNNER_TEMP/space-rust-image.tar.zst"
+
+      - name: Hand the Rust image to bootstrap
+        env:
+          SPACE_SHA: ${{ steps.machine.outputs.space_sha }}
+        run: |
           {
             echo "SPACE_KIND_RUST_ARTIFACTS=prebuilt"
             echo "SPACE_KIND_PREBUILT_RUST_IMAGE_ID=$(docker image inspect -f '{{.Id}}' space-rust-build-kind:local)"
@@ -200,28 +271,7 @@ jobs:
           time bash infra/space/kind/scripts/install-fc-vendor.sh
           time bash infra/space/kind/scripts/bootstrap.sh
           kill "$preload" 2>/dev/null || true
-
-      # Saved even when a later part of bootstrap fails, as long as the compile finished.
-      - name: Export the compiled SPACE Rust image
-        id: rust-export
-        if: ${{ !cancelled() && steps.rust-cache.outputs.cache-hit != 'true' }}
-        continue-on-error: true
-        run: |
-          if docker image inspect space-rust-build-kind:local >/dev/null 2>&1; then
-            docker save space-rust-build-kind:local | zstd -T0 -3 -q -o "$RUNNER_TEMP/space-rust-image.tar.zst"
-            ls -lh "$RUNNER_TEMP/space-rust-image.tar.zst"
-            echo "ready=true" >>"$GITHUB_OUTPUT"
-          else
-            echo "::warning::No compiled Rust image to cache"
-          fi
-
-      - name: Save the compiled SPACE Rust image for later runs
-        if: ${{ !cancelled() && steps.rust-export.outputs.ready == 'true' }}
-        continue-on-error: true
-        uses: actions/cache/save@v6
-        with:
-          path: ${{ runner.temp }}/space-rust-image.tar.zst
-          key: space-rust-artifacts-${{ steps.machine.outputs.space_sha }}
+          df -h / /mnt
 
       - name: Wait for the seed template and node services
         working-directory: SPACE

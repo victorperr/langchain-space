@@ -43,6 +43,7 @@ from langchain_space.client import (
     CommandResult,
     FileStat,
     SpaceError,
+    read_files_one_by_one,
     write_files_one_by_one,
 )
 
@@ -233,6 +234,10 @@ class LangSmithClient:
     ) -> list[SpaceError | None]:
         """See `SpaceClient.write_files`. One `mkdir` per parent directory, then each write."""
         return write_files_one_by_one(self, sandbox_id, files)
+
+    def read_files(self, sandbox_id: str, paths: Sequence[str]) -> list[bytes | SpaceError]:
+        """See `SpaceClient.read_files`. A `stat` and a read per file."""
+        return read_files_one_by_one(self, sandbox_id, paths)
 
     def read_file(self, sandbox_id: str, path: str, *, size: int | None = None) -> bytes:
         """See `SpaceClient.read_file`. `size` is not needed."""

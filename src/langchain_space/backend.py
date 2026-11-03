@@ -325,22 +325,19 @@ class SpaceSandbox(BaseSandbox):
         return responses
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
-        """Read each file. Errors are reported per file."""
-        responses: list[FileDownloadResponse] = []
-        for path in paths:
-            if not _is_absolute(path):
-                responses.append(FileDownloadResponse(path, error=INVALID_PATH))
-                continue
-            try:
-                stat = self._client.stat(self._sandbox_id, path)
-                if stat.file_type == "directory":
-                    responses.append(FileDownloadResponse(path, error=IS_DIRECTORY))
-                    continue
-                content = self._client.read_file(self._sandbox_id, path, size=stat.size_bytes)
-            except SpaceError as error:
-                responses.append(FileDownloadResponse(path, error=_file_error(error)))
-            else:
-                responses.append(FileDownloadResponse(path, content=content))
+        """Read each file. Errors are reported per file.
+
+        Valid paths go to the client in one `read_files` call, which batches them.
+        """
+        responses = [FileDownloadResponse(path, error=INVALID_PATH) for path in paths]
+        to_read = [index for index, path in enumerate(paths) if _is_absolute(path)]
+        if to_read:
+            results = self._client.read_files(self._sandbox_id, [paths[i] for i in to_read])
+            for index, result in zip(to_read, results, strict=True):
+                if isinstance(result, SpaceError):
+                    responses[index] = FileDownloadResponse(paths[index], error=_file_error(result))
+                else:
+                    responses[index] = FileDownloadResponse(paths[index], content=result)
         return responses
 
     def terminate(self) -> None:
@@ -360,6 +357,8 @@ def _file_error(error: SpaceError) -> str:
     """Map a SPACE file-route error to Deep Agents' standard codes where one fits."""
     if error.is_path_not_found:
         return FILE_NOT_FOUND
+    if error.code == "is_directory":
+        return IS_DIRECTORY
     if error.code == "forbidden":
         return PERMISSION_DENIED
     if error.code == "invalid_request":

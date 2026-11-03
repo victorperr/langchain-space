@@ -172,6 +172,15 @@ class TestDownload:
         fake.sandbox(sandbox.id).unreadable.add("/w/secret")
         assert sandbox.download_files([path]) == [FileDownloadResponse(path, None, error)]
 
+    def test_valid_paths_go_to_the_client_in_one_call(
+        self, fake: FakeSpaceClient, sandbox: SpaceSandbox
+    ) -> None:
+        sandbox.upload_files([("/w/a", b"a"), ("/w/b", b"b")])
+        responses = sandbox.download_files(["/w/a", "rel", "/w/b"])
+        assert [r.content for r in responses] == [b"a", None, b"b"]
+        [call] = fake.calls_to("read_files")
+        assert call.args["paths"] == ["/w/a", "/w/b"]
+
     def test_download_does_not_bump_generation(self, sandbox: SpaceSandbox) -> None:
         sandbox.upload_files([("/w/a", b"a")])
         before = sandbox.generation

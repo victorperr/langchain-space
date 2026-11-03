@@ -48,6 +48,14 @@ def out(kind: str, text: str, seq: int) -> dict[str, Any]:
     return {"type": kind, "seq": seq, "data_base64": base64.b64encode(text.encode()).decode()}
 
 
+def exited(code: int) -> dict[str, Any]:
+    return {"type": "process_exited", "exit_code": code, "status": "exited"}
+
+
+def b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
+
+
 def mock_running(mock: respx.MockRouter, sandbox_id: str) -> None:
     mock.get(f"{API}/v1/sandboxes/{sandbox_id}").respond(
         json={"id": sandbox_id, "state": "running"}
@@ -390,6 +398,79 @@ class TestFiles:
         assert [r.error for r in responses] == [None] * 200
         assert batch.call_count == 1
         assert len(mock.calls) == 1  # no mkdir, no single writes
+
+    def test_read_files_reads_many_files_with_one_command(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        output = "F 2\n" + b64(b"ab") + "\nF 0\n\nF 3\n" + b64(b"\x00\xff\n") + "\n"
+        created, _ = mock_command(mock, sse(out("stdout", output, 1), exited(0)))
+        stat = mock.post(f"{API}/v1/sandboxes/sbx_1/files:stat")
+
+        results = client.read_files("sbx_1", ["/a", "/empty", "/bin"])
+
+        assert results == [b"ab", b"", b"\x00\xff\n"]
+        argv = json.loads(created.calls[0].request.content)["command"]
+        assert argv[:2] == ["sh", "-c"] and argv[-3:] == ["/a", "/empty", "/bin"]
+        assert not stat.called
+
+    def test_read_files_reports_each_missing_file(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        mock_command(mock, sse(out("stdout", "D\nN\nP\nF 1\n" + b64(b"x") + "\n", 1), exited(0)))
+
+        directory, missing, denied, ok = client.read_files("sbx_1", ["/d", "/n", "/p", "/ok"])
+
+        assert isinstance(directory, SpaceError) and directory.code == "is_directory"
+        assert isinstance(missing, SpaceError) and missing.is_path_not_found
+        assert isinstance(denied, SpaceError) and denied.code == "forbidden"
+        assert ok == b"x"
+
+    def test_read_files_reads_files_over_the_output_budget_directly(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        mock_command(mock, sse(out("stdout", "F 1\n" + b64(b"a") + "\nB 6\n", 1), exited(0)))
+        stat = mock.post(f"{API}/v1/sandboxes/sbx_1/files:stat")
+        read = mock.post(f"{API}/v1/sandboxes/sbx_1/files:read")
+        read.side_effect = [
+            httpx.Response(200, content=b"bigg"),
+            httpx.Response(200, content=b"er"),
+        ]
+
+        assert client.read_files("sbx_1", ["/a", "/big"]) == [b"a", b"bigger"]
+        assert not stat.called  # the size came with the command's output
+
+    def test_read_files_falls_back_to_single_reads_after_cut_output(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        cut = "F 1\n" + b64(b"a") + "\nF 8\n" + b64(b"abcdefgh")[:5]  # second record cut short
+        mock_command(mock, sse(out("stdout", cut, 1), exited(0)))
+        mock.post(f"{API}/v1/sandboxes/sbx_1/files:stat").respond(
+            json={"entry": {"path": "/b", "file_type": "file", "size_bytes": 2}}
+        )
+        mock.post(f"{API}/v1/sandboxes/sbx_1/files:read").respond(200, content=b"bb")
+
+        assert client.read_files("sbx_1", ["/a", "/b"]) == [b"a", b"bb"]
+
+    def test_read_files_falls_back_when_the_command_fails(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        mock.post(f"{API}/v1/sandboxes/sbx_1/commands").respond(
+            400, json={"code": "invalid_request", "message": "no"}
+        )
+        mock.post(f"{API}/v1/sandboxes/sbx_1/files:stat").respond(
+            json={"entry": {"path": "/f", "file_type": "file", "size_bytes": 1}}
+        )
+        mock.post(f"{API}/v1/sandboxes/sbx_1/files:read").respond(200, content=b"z")
+
+        assert client.read_files("sbx_1", ["/f", "/g"]) == [b"z", b"z"]
+
+    def test_download_of_many_files_costs_one_command(self, mock: respx.MockRouter) -> None:
+        output = "".join(f"F 1\n{b64(str(i % 10).encode())}\n" for i in range(50))
+        mock_command(mock, sse(out("stdout", output, 1), exited(0)))
+        with HttpSpaceClient(API, DATA_PLANE, "tok") as http:
+            responses = SpaceSandbox(http, "sbx_1").download_files([f"/s/{i}" for i in range(50)])
+        assert [r.content for r in responses] == [str(i % 10).encode() for i in range(50)]
+        assert len(mock.calls) == 2  # create the command, stream its output
 
     def test_download_costs_one_stat_and_one_read(self, mock: respx.MockRouter) -> None:
         stat = mock.post(f"{API}/v1/sandboxes/sbx_1/files:stat").respond(

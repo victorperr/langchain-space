@@ -221,6 +221,17 @@ def test_write_files_reports_each_file(client: LangSmithClient, stub: StubSandbo
     assert len(mkdirs) == 2  # one per parent directory: /home/user/a and /home/user/f
 
 
+def test_read_files_reports_each_file(client: LangSmithClient) -> None:
+    name = client.create_sandbox("")
+    client.write_files(name, [("/home/user/a/1", b"1")])
+    found, directory, missing = client.read_files(
+        name, ["/home/user/a/1", "/home/user/a", "/home/user/none"]
+    )
+    assert found == b"1"
+    assert isinstance(directory, SpaceError) and directory.code == "is_directory"
+    assert isinstance(missing, SpaceError) and missing.is_path_not_found
+
+
 def test_backend_upload_and_download_round_trip(client: LangSmithClient) -> None:
     sandbox = SpaceSandbox(client, client.create_sandbox(""))
     [uploaded] = sandbox.upload_files([("/home/user/work/x.txt", b"data")])
