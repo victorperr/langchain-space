@@ -14,6 +14,7 @@ import contextlib
 import json
 import logging
 import os
+import posixpath
 import random
 import threading
 import time
@@ -38,6 +39,11 @@ _FIRST_POLL_DELAY = 0.05
 _TERMINAL_OPERATION_STATES = frozenset({"canceled", "expired", "failed", "succeeded"})
 _TERMINAL_SANDBOX_STATES = frozenset({"deleted", "deleting", "failed"})
 _SUSPEND_UPLOAD_CONFLICT = "suspend-snapshot upload in flight"
+_WRITE_BATCH_MAX_ENTRIES = 256
+"""Files per `files:write_batch` (`MAX_WRITE_BATCH_ENTRIES`, SPACE common/core/src/lib.rs)."""
+_WRITE_BATCH_MAX_BYTES = 3 * MIB
+"""Data plus path bytes per `files:write_batch` (`MAX_FILE_WRITE_BATCH_BYTES`,
+SPACE api/src/routes/public/files.rs)."""
 
 
 @dataclass(frozen=True)
@@ -143,6 +149,15 @@ class SpaceClient(Protocol):
         """Create or replace the file at `path`. The parent directory must exist."""
         ...
 
+    def write_files(
+        self, sandbox_id: str, files: Sequence[tuple[str, bytes]]
+    ) -> list[SpaceError | None]:
+        """Create or replace each file, creating missing parent directories, in order.
+
+        Returns one entry per file: None if it was written, else the error for that file.
+        """
+        ...
+
     def read_file(self, sandbox_id: str, path: str, *, size: int | None = None) -> bytes:
         """Return the full contents of the file at `path`.
 
@@ -200,6 +215,34 @@ class SpaceClient(Protocol):
     def set_network_policy(self, sandbox_id: str, policy: Mapping[str, Any]) -> None:
         """Replace the sandbox's network policy and wait until it is applied."""
         ...
+
+
+def write_files_one_by_one(
+    client: SpaceClient,
+    sandbox_id: str,
+    files: Sequence[tuple[str, bytes]],
+    *,
+    made_dirs: set[str] | None = None,
+) -> list[SpaceError | None]:
+    """`SpaceClient.write_files` built from `mkdir` and `write_file`.
+
+    Makes one `mkdir` per parent directory. `made_dirs` holds the directories already
+    created, shared between calls.
+    """
+    made = made_dirs if made_dirs is not None else set()
+    results: list[SpaceError | None] = []
+    for path, data in files:
+        try:
+            parent = posixpath.dirname(path)
+            if parent and parent != "/" and parent not in made:
+                client.mkdir(sandbox_id, parent, parents=True)
+                made.add(parent)
+            client.write_file(sandbox_id, path, data)
+        except SpaceError as error:
+            results.append(error)
+        else:
+            results.append(None)
+    return results
 
 
 @dataclass(frozen=True)
@@ -597,6 +640,61 @@ class HttpSpaceClient:
                 },
                 mutation=True,
             )
+
+    def write_files(
+        self, sandbox_id: str, files: Sequence[tuple[str, bytes]]
+    ) -> list[SpaceError | None]:
+        """See `SpaceClient.write_files`.
+
+        Consecutive small files share one `files:write_batch` request (at most 256 files
+        and 3 MiB of data plus paths), which also creates their parent directories. A file
+        too large for a batch is written on its own with `write_file`.
+
+        SPACE stops a batch at its first failing file without saying which one failed, so
+        the files of a failed batch are written again one by one, each getting its own
+        result. Writing a file that already landed again is harmless: every write replaces.
+        """
+        results: list[SpaceError | None] = []
+        made_dirs: set[str] = set()
+        batch: list[tuple[str, bytes]] = []
+        batch_bytes = 0
+        for path, data in files:
+            size = len(path.encode()) + len(data)
+            full = len(batch) == _WRITE_BATCH_MAX_ENTRIES
+            if batch and (full or batch_bytes + size > _WRITE_BATCH_MAX_BYTES):
+                results.extend(self._write_batch(sandbox_id, batch, made_dirs))
+                batch, batch_bytes = [], 0
+            if size > _WRITE_BATCH_MAX_BYTES:
+                results.extend(
+                    write_files_one_by_one(self, sandbox_id, [(path, data)], made_dirs=made_dirs)
+                )
+                continue
+            batch.append((path, data))
+            batch_bytes += size
+        if batch:
+            results.extend(self._write_batch(sandbox_id, batch, made_dirs))
+        return results
+
+    def _write_batch(
+        self, sandbox_id: str, batch: list[tuple[str, bytes]], made_dirs: set[str]
+    ) -> list[SpaceError | None]:
+        entries = [
+            {"path": path, "data_base64": base64.b64encode(data).decode("ascii")}
+            for path, data in batch
+        ]
+        try:
+            self._json(
+                "POST",
+                f"/v1/sandboxes/{_q(sandbox_id)}/files:write_batch",
+                body={"entries": entries, "parents": True},
+                mutation=True,
+            )
+        except SpaceError as error:
+            logger.debug(
+                "batch of %d files failed (%s); writing them one by one", len(batch), error
+            )
+            return write_files_one_by_one(self, sandbox_id, batch, made_dirs=made_dirs)
+        return [None] * len(batch)
 
     def read_file(self, sandbox_id: str, path: str, *, size: int | None = None) -> bytes:
         """See `SpaceClient.read_file`. Reads in chunks of at most `chunk_size` bytes."""

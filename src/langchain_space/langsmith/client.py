@@ -39,7 +39,12 @@ from langsmith.sandbox import (
     ValidationError,
 )
 
-from langchain_space.client import CommandResult, FileStat, SpaceError
+from langchain_space.client import (
+    CommandResult,
+    FileStat,
+    SpaceError,
+    write_files_one_by_one,
+)
 
 DEFAULT_TEMPLATE = ""
 """Template meaning "LangSmith's default image" (no snapshot)."""
@@ -222,6 +227,12 @@ class LangSmithClient:
         sandbox = self._sandbox(sandbox_id)
         with _translated():
             sandbox.write(path, data)
+
+    def write_files(
+        self, sandbox_id: str, files: Sequence[tuple[str, bytes]]
+    ) -> list[SpaceError | None]:
+        """See `SpaceClient.write_files`. One `mkdir` per parent directory, then each write."""
+        return write_files_one_by_one(self, sandbox_id, files)
 
     def read_file(self, sandbox_id: str, path: str, *, size: int | None = None) -> bytes:
         """See `SpaceClient.read_file`. `size` is not needed."""

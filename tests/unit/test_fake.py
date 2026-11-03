@@ -24,6 +24,19 @@ def test_write_requires_parent_directory() -> None:
     assert fake.read_file(sbx, "/a/b.txt") == b"x"
 
 
+def test_write_files_creates_parents_and_reports_each_file() -> None:
+    fake = FakeSpaceClient()
+    sbx = fake.create_sandbox("t")
+    fake.write_file(sbx, "/tmp/file", b"x")
+
+    results = fake.write_files(sbx, [("/a/b/c.txt", b"1"), ("/tmp/file/x", b"2"), ("/a/d", b"3")])
+
+    assert results[0] is None and results[2] is None
+    assert results[1] is not None and results[1].code == "failed_precondition"
+    assert fake.read_file(sbx, "/a/b/c.txt") == b"1"
+    assert fake.stat(sbx, "/a/b").file_type == "directory"
+
+
 def test_relative_paths_resolve_under_home() -> None:
     fake = FakeSpaceClient()
     sbx = fake.create_sandbox("t")

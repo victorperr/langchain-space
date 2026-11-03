@@ -207,6 +207,20 @@ def test_mkdir_creates_parents_and_refuses_files(client: LangSmithClient) -> Non
         client.mkdir(name, "/home/user/f")
 
 
+def test_write_files_reports_each_file(client: LangSmithClient, stub: StubSandboxClient) -> None:
+    name = client.create_sandbox("")
+    client.write_file(name, "/home/user/f", b"")
+    files = [("/home/user/a/1", b"1"), ("/home/user/f/x", b"2"), ("/home/user/a/2", b"3")]
+
+    results = client.write_files(name, files)
+
+    assert results[0] is None and results[2] is None
+    assert isinstance(results[1], SpaceError)
+    assert client.read_file(name, "/home/user/a/2") == b"3"
+    mkdirs = [r for r in stub.sandboxes[name].runs if "mkdir" in r["command"]]
+    assert len(mkdirs) == 2  # one per parent directory: /home/user/a and /home/user/f
+
+
 def test_backend_upload_and_download_round_trip(client: LangSmithClient) -> None:
     sandbox = SpaceSandbox(client, client.create_sandbox(""))
     [uploaded] = sandbox.upload_files([("/home/user/work/x.txt", b"data")])

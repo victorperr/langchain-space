@@ -296,6 +296,101 @@ class TestFiles:
         assert client.read_file("sbx_1", "/f", size=2) == b"ab"
         assert not stat.called
 
+    def test_write_files_sends_small_files_in_one_batch(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        batch = mock.post(f"{API}/v1/sandboxes/sbx_1/files:write_batch").respond(
+            json={"files_written": 2}
+        )
+        single = mock.post(f"{API}/v1/sandboxes/sbx_1/files:write")
+        mkdir = mock.post(f"{API}/v1/sandboxes/sbx_1/files:mkdir")
+
+        results = client.write_files("sbx_1", [("/w/a/one", b"1"), ("/w/b/two", b"22")])
+
+        assert results == [None, None]
+        assert batch.call_count == 1
+        assert not single.called and not mkdir.called  # the batch creates parents itself
+        body = json.loads(batch.calls[0].request.content)
+        assert body["parents"] is True
+        assert [(e["path"], base64.b64decode(e["data_base64"])) for e in body["entries"]] == [
+            ("/w/a/one", b"1"),
+            ("/w/b/two", b"22"),
+        ]
+        assert batch.calls[0].request.headers["Idempotency-Key"]
+
+    def test_write_files_splits_batches_at_256_files(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        batch = mock.post(f"{API}/v1/sandboxes/sbx_1/files:write_batch").respond(json={})
+        files = [(f"/w/{i}", b"x") for i in range(300)]
+        assert client.write_files("sbx_1", files) == [None] * 300
+        sizes = [len(json.loads(c.request.content)["entries"]) for c in batch.calls]
+        assert sizes == [256, 44]
+
+    def test_write_files_splits_batches_at_3_mib(self, mock: respx.MockRouter) -> None:
+        batch = mock.post(f"{API}/v1/sandboxes/sbx_1/files:write_batch").respond(json={})
+        one_mib = b"x" * (1024 * 1024 - 10)  # leaves room for the 4-byte path
+        files = [(f"/w/{i}", one_mib) for i in range(4)]
+        with HttpSpaceClient(API, DATA_PLANE, "tok") as http:
+            assert http.write_files("sbx_1", files) == [None] * 4
+        sizes = [len(json.loads(c.request.content)["entries"]) for c in batch.calls]
+        assert sizes == [3, 1]
+
+    def test_write_files_sends_a_large_file_alone_in_order(self, mock: respx.MockRouter) -> None:
+        sent: list[str] = []
+
+        def record(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            paths = [e["path"] for e in body.get("entries", [body])]
+            sent.extend(f"{request.url.path.rsplit(':', 1)[1]} {p}" for p in paths)
+            return httpx.Response(200, json={})
+
+        mock.post(f"{API}/v1/sandboxes/sbx_1/files:write_batch").mock(side_effect=record)
+        mock.post(f"{API}/v1/sandboxes/sbx_1/files:write").mock(side_effect=record)
+        mock.post(f"{API}/v1/sandboxes/sbx_1/files:mkdir").respond(json={"ok": True})
+        big = b"x" * (3 * 1024 * 1024)  # path + data exceed one batch
+        with HttpSpaceClient(API, DATA_PLANE, "tok") as http:
+            results = http.write_files("sbx_1", [("/w/a", b"1"), ("/w/big", big), ("/w/c", b"3")])
+        assert results == [None, None, None]
+        assert sent == ["write_batch /w/a", "write /w/big", "write_batch /w/c"]
+
+    def test_failed_batch_is_rewritten_file_by_file(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        # SPACE stops a batch at the first failing file and does not say which one it was.
+        mock.post(f"{API}/v1/sandboxes/sbx_1/files:write_batch").respond(
+            412, json={"code": "failed_precondition", "message": "not a directory"}
+        )
+        mkdir = mock.post(f"{API}/v1/sandboxes/sbx_1/files:mkdir")
+        mkdir.side_effect = lambda request: (
+            httpx.Response(412, json={"code": "failed_precondition", "message": "is a file"})
+            if json.loads(request.content)["path"] == "/w/file"
+            else httpx.Response(200, json={"ok": True})
+        )
+        write = mock.post(f"{API}/v1/sandboxes/sbx_1/files:write").respond(json={})
+
+        results = client.write_files("sbx_1", [("/w/ok", b"1"), ("/w/file/child", b"2")])
+
+        assert results[0] is None
+        assert results[1] is not None and results[1].code == "failed_precondition"
+        assert [json.loads(c.request.content)["path"] for c in write.calls] == ["/w/ok"]
+
+    def test_write_files_with_no_files_sends_nothing(
+        self, client: HttpSpaceClient, mock: respx.MockRouter
+    ) -> None:
+        batch = mock.post(f"{API}/v1/sandboxes/sbx_1/files:write_batch")
+        assert client.write_files("sbx_1", []) == []
+        assert not batch.called
+
+    def test_upload_of_many_small_files_costs_one_request(self, mock: respx.MockRouter) -> None:
+        batch = mock.post(f"{API}/v1/sandboxes/sbx_1/files:write_batch").respond(json={})
+        files = [(f"/w/d{i % 7}/f{i}", b"x") for i in range(200)]
+        with HttpSpaceClient(API, DATA_PLANE, "tok") as http:
+            responses = SpaceSandbox(http, "sbx_1").upload_files(files)
+        assert [r.error for r in responses] == [None] * 200
+        assert batch.call_count == 1
+        assert len(mock.calls) == 1  # no mkdir, no single writes
+
     def test_download_costs_one_stat_and_one_read(self, mock: respx.MockRouter) -> None:
         stat = mock.post(f"{API}/v1/sandboxes/sbx_1/files:stat").respond(
             json={"entry": {"path": "/f", "file_type": "file", "size_bytes": 2}}

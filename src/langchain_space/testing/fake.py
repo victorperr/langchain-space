@@ -200,6 +200,35 @@ class FakeSpaceClient:
             raise _path_not_found(path)
         sandbox.files[normalized] = bytes(data)
 
+    def write_files(
+        self, sandbox_id: str, files: Sequence[tuple[str, bytes]]
+    ) -> list[SpaceError | None]:
+        """See `SpaceClient.write_files`. Recorded as one call, like one SPACE batch."""
+        self._record("write_files", sandbox_id=sandbox_id, files=list(files))
+        results: list[SpaceError | None] = []
+        for path, data in files:
+            try:
+                sandbox = self._running(sandbox_id)
+                normalized = sandbox.normalize(path)
+                parent = posixpath.dirname(normalized)
+                while parent not in sandbox.dirs:
+                    if parent in sandbox.files:
+                        raise SpaceError(
+                            f"{parent} is not a directory", code="failed_precondition", status=412
+                        )
+                    parent = posixpath.dirname(parent)
+                if normalized in sandbox.dirs:
+                    raise SpaceError(
+                        f"{path} is a directory", code="failed_precondition", status=412
+                    )
+                sandbox._make_parents(normalized)
+                sandbox.files[normalized] = bytes(data)
+            except SpaceError as error:
+                results.append(error)
+            else:
+                results.append(None)
+        return results
+
     def read_file(self, sandbox_id: str, path: str, *, size: int | None = None) -> bytes:
         """See `SpaceClient.read_file`. `size` is recorded but not needed."""
         self._record("read_file", sandbox_id=sandbox_id, path=path, size=size)

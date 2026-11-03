@@ -147,7 +147,7 @@ def test_routed_write_resolves_the_sandbox_once() -> None:
 
     assert result["ok"]
     assert len(acquired) == 1
-    assert fake.calls_to("write_file")
+    assert fake.calls_to("write_files")
 
 
 def test_one_snapshot_per_state_change(fake: FakeSpaceClient, saver: SpaceCheckpointer) -> None:
@@ -236,7 +236,7 @@ def test_anchors_are_never_written(fake: FakeSpaceClient, saver: SpaceCheckpoint
     graph.invoke({"target": "x"}, find_state(graph, "t", target="v1", finished=True).config)
 
     anchors = set(saver.registry.anchors)
-    writes = fake.calls_to("write_file") + fake.calls_to("run_command")
+    writes = fake.calls_to("write_files") + fake.calls_to("run_command")
     assert anchors
     assert not anchors & {c.args["sandbox_id"] for c in writes}
     assert all(fake.sandbox(a).state == "suspended" for a in anchors)

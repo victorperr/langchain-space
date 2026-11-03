@@ -6,7 +6,6 @@ This module must not import LangGraph, so it stays usable from a plain script.
 from __future__ import annotations
 
 import contextlib
-import posixpath
 import threading
 from collections.abc import Callable, Iterator, Mapping
 from contextvars import ContextVar
@@ -301,29 +300,28 @@ class SpaceSandbox(BaseSandbox):
         return await super().aedit(file_path, old_string, new_string, replace_all)
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
-        """Write each file, creating parent directories. Errors are reported per file."""
+        """Write each file, creating parent directories. Errors are reported per file.
+
+        Valid files go to the client in one `write_files` call, which batches them.
+        """
         if files:
             self._bump()
-        responses: list[FileUploadResponse] = []
-        made_dirs: set[str] = set()  # one mkdir per parent directory, not per file
-        for path, content in files:
+        responses = [FileUploadResponse(path) for path, _ in files]
+        to_send: list[int] = []  # indexes of the files that pass the checks
+        for index, (path, content) in enumerate(files):
             if not _is_absolute(path):
-                responses.append(FileUploadResponse(path, error=INVALID_PATH))
+                responses[index] = FileUploadResponse(path, error=INVALID_PATH)
                 continue
             blocked = self._blocked(path.encode() + b"\n" + content, f"file {path}")
             if blocked is not None:
-                responses.append(FileUploadResponse(path, error=blocked))
+                responses[index] = FileUploadResponse(path, error=blocked)
                 continue
-            try:
-                parent = posixpath.dirname(path)
-                if parent and parent != "/" and parent not in made_dirs:
-                    self._client.mkdir(self._sandbox_id, parent, parents=True)
-                    made_dirs.add(parent)
-                self._client.write_file(self._sandbox_id, path, content)
-            except SpaceError as error:
-                responses.append(FileUploadResponse(path, error=_file_error(error)))
-            else:
-                responses.append(FileUploadResponse(path))
+            to_send.append(index)
+        if to_send:
+            results = self._client.write_files(self._sandbox_id, [files[i] for i in to_send])
+            for index, error in zip(to_send, results, strict=True):
+                if error is not None:
+                    responses[index] = FileUploadResponse(files[index][0], error=_file_error(error))
         return responses
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:

@@ -131,7 +131,12 @@ There is no SPACE Python SDK; we call the HTTP API with `httpx` + `httpx-sse`.
   only, no replay). Events: `stdout`/`stderr` (`data_base64`), `process_exited` (`exit_code`; 124 =
   timeout, 128+n = signal), `closed`, `error`, `resync_required`. Only `process_exited` means done.
 - **File upload / download** (incubating): `POST /v1/sandboxes/{id}/files:write {path, data_base64,
-  append?}` (≤16 MiB; parent dir must exist), `files:write_batch {entries[]}` (≤256 entries, ≤3 MiB),
+  append?, parents?}` (≤16 MiB; without `parents: true` the parent dir must exist),
+  `files:write_batch {entries[{path, data_base64, append?}], parents?}` -> `{files_written}`
+  (≤256 entries, ≤3 MiB of data + path bytes; `parents` cannot be combined with `append`). The guest
+  writes entries in order and stops at the first failure without naming it; earlier entries stay
+  written (`api/src/routes/public/files.rs`, `spaced/guest/execution/src/filesystem/write.rs`, same
+  at b6ca1b2). `HttpSpaceClient.write_files` batches and rewrites a failed batch one file at a time.
   `files:read {path, offset, length (1..16 MiB)}` -> raw bytes, `files:stat`, `files:list`,
   `files:mkdir {path, parents}`, `files:remove`, `files:rename`. Missing file = 404 with detail
   `resource=path` (a 404 without it = sandbox not found). Relative paths resolve under `/home/user`.

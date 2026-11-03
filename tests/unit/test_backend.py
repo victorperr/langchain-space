@@ -126,7 +126,7 @@ class TestUpload:
     ) -> None:
         responses = sandbox.upload_files([("rel.txt", b"x")])
         assert responses == [FileUploadResponse("rel.txt", error="invalid_path")]
-        assert fake.calls_to("write_file") == []
+        assert fake.calls_to("write_files") == []
 
     def test_partial_success(self, fake: FakeSpaceClient, sandbox: SpaceSandbox) -> None:
         sandbox.upload_files([("/w/file", b"x")])
@@ -134,11 +134,13 @@ class TestUpload:
         assert responses[0].error is not None
         assert responses[1] == FileUploadResponse("/w/ok")
 
-    def test_one_mkdir_per_parent_directory(
+    def test_valid_files_go_to_the_client_in_one_call(
         self, fake: FakeSpaceClient, sandbox: SpaceSandbox
     ) -> None:
-        sandbox.upload_files([("/w/a", b"1"), ("/w/b", b"2"), ("/w/sub/c", b"3")])
-        assert [c.args["path"] for c in fake.calls_to("mkdir")] == ["/w", "/w/sub"]
+        responses = sandbox.upload_files([("/w/a", b"1"), ("rel", b"2"), ("/w/sub/c", b"3")])
+        assert [r.error for r in responses] == [None, "invalid_path", None]
+        [call] = fake.calls_to("write_files")
+        assert [path for path, _ in call.args["files"]] == ["/w/a", "/w/sub/c"]
 
     def test_upload_bumps_generation(self, sandbox: SpaceSandbox) -> None:
         before = sandbox.generation

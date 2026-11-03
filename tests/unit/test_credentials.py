@@ -135,7 +135,8 @@ class TestSecretGuard:
     ) -> None:
         [response] = sandbox.upload_files([("/tmp/.env", f"TOKEN={SECRET}".encode())])
         assert response.error is not None
-        assert fake.calls_to("write_file") == []
+        assert fake.calls_to("write_files") == []
+        assert SECRET not in fake.transcript()
 
     def test_env_with_secret_refuses_to_create(self, fake: FakeSpaceClient) -> None:
         with pytest.raises(SecretLeakError):
@@ -160,7 +161,7 @@ class TestSecretGuard:
         result = sandbox.edit("/tmp/config.py", "TOKEN = ''", f"TOKEN = '{SECRET}'")
         assert result.error is not None and "blocked" in result.error
         assert fake.calls_to("run_command") == []
-        assert fake.calls_to("write_file") == []
+        assert fake.calls_to("write_files") == []
 
     async def test_secret_sent_through_async_edit_is_not_sent(
         self, fake: FakeSpaceClient, sandbox: SpaceSandbox
